@@ -1,0 +1,95 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+
+	_ "modernc.org/sqlite"
+)
+
+// ErrNotFound is returned by GetWatch when the id does not exist. GetCursor
+// and GetMeta instead return a zero value with a nil error for missing keys.
+var ErrNotFound = errors.New("store: not found")
+
+// Store is an open whinny state database.
+//
+// The daemon is a single writer: all write methods are serialized by one
+// mutex, so writes never contend even if called from multiple goroutines.
+// Reads may run concurrently.
+type Store struct {
+	db *sql.DB
+	mu sync.Mutex
+}
+
+// Open opens (creating if needed) the SQLite database at path, runs the
+// schema migrations, and enables WAL mode and foreign keys on every
+// connection.
+func Open(path string) (*Store, error) {
+	dsn := path
+	if !strings.Contains(path, "?") {
+		dsn = path + "?_foreign_keys=on&_journal_mode=WAL"
+	}
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("store: open %s: %w", path, err)
+	}
+	s := &Store{db: db}
+	if err := s.migrate(context.Background()); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// Close closes the database.
+func (s *Store) Close() error { return s.db.Close() }
+
+// schema is the full migration set. Every statement is idempotent, so
+// re-running it on an existing database is a no-op.
+const schema = `
+CREATE TABLE IF NOT EXISTS watches (
+  id TEXT PRIMARY KEY,
+  room_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  from_user TEXT,
+  pattern TEXT,
+  thread_id TEXT,
+  reply_to TEXT,
+  note TEXT,
+  once INTEGER NOT NULL DEFAULT 1,
+  ttl_s INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_watches_expires_at ON watches (expires_at);
+CREATE TABLE IF NOT EXISTS wake_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wake_queue_agent ON wake_queue (agent);
+CREATE TABLE IF NOT EXISTS breaker (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  latched INTEGER NOT NULL DEFAULT 0,
+  latched_at INTEGER,
+  reason TEXT
+);
+CREATE TABLE IF NOT EXISTS cursors (
+  room_id TEXT PRIMARY KEY,
+  last_log_id INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+`
+
+func (s *Store) migrate(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, schema)
+	return err
+}
