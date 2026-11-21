@@ -31,12 +31,13 @@ func TestExecDelivererReceivesStdin(t *testing.T) {
 	}
 }
 
-func TestExecDelivererLogsNonZeroExit(t *testing.T) {
+func TestExecDelivererReturnsNonZeroExit(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "fail.sh")
 	writeScript(t, script, "#!/bin/sh\ncat > /dev/null\nexit 3\n")
 	d := &execDeliverer{cmd: []string{script}}
-	if err := d.Deliver(context.Background(), "agent", Envelope{Text: "x"}); err != nil {
-		t.Errorf("Deliver with failing command: err = %v, want nil (logged, not raised)", err)
+	err := d.Deliver(context.Background(), "agent", Envelope{Text: "x"})
+	if err == nil {
+		t.Errorf("Deliver with failing command: err = nil, want the exit error (callers decide to log or keep the wake)")
 	}
 }
 

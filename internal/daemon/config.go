@@ -85,7 +85,9 @@ type AmbientConfig struct {
 	// Threshold is the directed-at-me probability cutoff when the
 	// classifier returns p.
 	Threshold float64
-	// MinSpacing is the minimum spacing between ambient wakes.
+	// MinSpacing is the minimum spacing between ambient wakes; 0 (or a
+	// negative) defaults to DefaultMinSpacing (30m) when the gate is
+	// enabled.
 	MinSpacing time.Duration
 	// MaxPerHour caps ambient wakes in any trailing hour.
 	MaxPerHour int
@@ -109,7 +111,8 @@ const (
 )
 
 // WithDefaults fills unset fields: Agent "resident", Mode "resident",
-// Deliver "exec", and ambient valve defaults when the gate is enabled.
+// Deliver "exec", and the ambient valve defaults (threshold, min
+// spacing, per-hour cap) when the gate is enabled.
 func (c Config) WithDefaults() Config {
 	if c.Agent == "" {
 		c.Agent = DefaultAgent
@@ -127,8 +130,8 @@ func (c Config) WithDefaults() Config {
 		if c.Ambient.MaxPerHour == 0 {
 			c.Ambient.MaxPerHour = DefaultMaxPerHour
 		}
-		if c.Ambient.MinSpacing < 0 {
-			c.Ambient.MinSpacing = 0
+		if c.Ambient.MinSpacing <= 0 {
+			c.Ambient.MinSpacing = DefaultMinSpacing
 		}
 	}
 	return c
@@ -150,8 +153,8 @@ func (c Config) Validate() error {
 }
 
 // ValidateBackend rejects the backend/endpoint combinations no backend
-// can serve. Run with an injected Deliverer skips this: the backend
-// field then describes what the CLI builds, not what delivers.
+// can serve. Run calls it before it connects, so a misconfigured
+// backend is rejected before the first wake can panic the deliverer.
 func (c Config) ValidateBackend() error {
 	switch c.Deliver {
 	case DeliverExec, DeliverResume:

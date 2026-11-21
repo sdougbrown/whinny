@@ -47,9 +47,9 @@ func NewDeliverer(cfg Config, stdout io.Writer) (Deliverer, func(), error) {
 
 // execDeliverer spawns cmd per wake, writes the envelope to stdin, and
 // waits (bounded by ExecWaitTimeout). A non-zero exit or spawn failure is
-// logged, not returned: the queue is already drained, and a failed
-// delivery is at-most-once by the store's contract — the loop must keep
-// going.
+// returned: the caller logs and moves on — the queue is already drained,
+// and a failed delivery is at-most-once by the store's contract, but the
+// shared expiry path needs to know to keep the watch for the next sweep.
 type execDeliverer struct {
 	cmd []string
 }
@@ -61,10 +61,7 @@ func (d *execDeliverer) Deliver(ctx context.Context, _ string, env Envelope) err
 	cmd.Stdin = strings.NewReader(env.Text)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		log.Printf("daemon: deliver via exec %s: %v", d.cmd[0], err)
-	}
-	return nil
+	return cmd.Run()
 }
 
 // socketDeliverer POSTs {"text": env, "agent": agent} to the socket URL.

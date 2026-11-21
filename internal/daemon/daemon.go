@@ -62,13 +62,19 @@ type daemon struct {
 	hist   *historyCache
 }
 
-// Run drives the daemon until ctx is done: it connects (when no client
-// is injected), drains stale queued wakes for its agent, then loops over
-// inbound records and the expiry sweep. It returns nil on clean shutdown
-// (ctx cancel or client close).
+// Run drives the daemon until ctx is done: it validates the config
+// (including the delivery backend, before any connection is attempted),
+// connects (when no client is injected), drains stale queued wakes for
+// its agent, then loops over inbound records and the expiry sweep. It
+// returns nil on clean shutdown (ctx cancel or client close).
 func Run(ctx context.Context, cfg Config, deps Deps) error {
 	cfg = cfg.WithDefaults()
 	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	// The backend is validated before the connection is attempted: a
+	// misconfigured backend is rejected without touching the network.
+	if err := cfg.ValidateBackend(); err != nil {
 		return err
 	}
 	if deps.Store == nil {
@@ -394,7 +400,9 @@ func (d *daemon) handleShared(ctx context.Context, m *apronws.Message) {
 		env := BuildEnvelope(hitDec, msg)
 		env.ImageURL = firstImageURL(m)
 		if cmd := d.ownerCommand(ctx, hit.Owner); len(cmd) > 0 {
-			(&execDeliverer{cmd: cmd}).Deliver(ctx, hit.Owner, env)
+			if err := (&execDeliverer{cmd: cmd}).Deliver(ctx, hit.Owner, env); err != nil {
+				log.Printf("daemon: deliver watch wake to %s: %v", hit.Owner, err)
+			}
 			continue
 		}
 		if err := d.dlv.Deliver(ctx, hit.Owner, env); err != nil {
@@ -437,9 +445,11 @@ func (d *daemon) ownsWatch(owner string) bool {
 // expireDue delivers expiry envelopes for every due watch and deletes
 // the watch: expiry is a wake the agent must see to re-arm. In resident
 // mode the envelope routes through the durable queue under cfg.Agent
-// (matching the message path) and foreign-owner watches are skipped; in
-// shared mode owners without a delivery callback are skipped (the same
-// rule as the message path).
+// (matching the message path) and foreign-owner watches are skipped; an
+// enqueue failure skips the watch for this sweep. In shared mode owners
+// without a delivery callback are skipped (the same rule as the message
+// path), and a failed delivery keeps the watch so the expiry re-fires
+// on the next sweep instead of being lost.
 func (d *daemon) expireDue(ctx context.Context) {
 	due, err := d.store.DueWatches(ctx, d.now())
 	if err != nil {
@@ -455,10 +465,17 @@ func (d *daemon) expireDue(ctx context.Context) {
 		}
 		env := ExpiryEnvelope(w)
 		if d.cfg.Mode == ModeShared {
-			if cmd := d.ownerCommand(ctx, w.Owner); len(cmd) > 0 {
-				(&execDeliverer{cmd: cmd}).Deliver(ctx, w.Owner, env)
-			} else if err := d.dlv.Deliver(ctx, w.Owner, env); err != nil {
+			// Shared mode delivers only to callback owners (the same
+			// rule as the message path); a failed delivery keeps the
+			// watch so the expiry re-fires on the next sweep instead
+			// of being lost.
+			cmd := d.ownerCommand(ctx, w.Owner)
+			if len(cmd) == 0 {
+				continue
+			}
+			if err := (&execDeliverer{cmd: cmd}).Deliver(ctx, w.Owner, env); err != nil {
 				log.Printf("daemon: deliver expiry to %s: %v", w.Owner, err)
+				continue
 			}
 		} else {
 			payload, err := encodePayload(env)

@@ -238,23 +238,32 @@ type delivered struct {
 	env   Envelope
 }
 
-// fakeDeliverer records every delivery and signals each one.
+// fakeDeliverer records every delivery and signals each one. When
+// fail is set, every delivery returns it (and is still recorded).
 type fakeDeliverer struct {
 	mu   sync.Mutex
 	got  []delivered
 	nowc chan struct{}
+	fail error
 }
 
 func newFakeDeliverer() *fakeDeliverer {
 	return &fakeDeliverer{nowc: make(chan struct{}, 64)}
 }
 
+func (f *fakeDeliverer) setFail(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fail = err
+}
+
 func (f *fakeDeliverer) Deliver(_ context.Context, agent string, env Envelope) error {
 	f.mu.Lock()
 	f.got = append(f.got, delivered{agent: agent, env: env})
+	fail := f.fail
 	f.mu.Unlock()
 	f.nowc <- struct{}{}
-	return nil
+	return fail
 }
 
 func (f *fakeDeliverer) wait(t *testing.T) delivered {
@@ -392,6 +401,9 @@ func baseCfg() Config {
 		Agent: "squire",
 		Self:  wake.Self{UserID: "u9", Name: "squire", Aliases: []string{"sq"}},
 		Peers: wake.Peers{"b1": {Name: "umpire", IsBot: true}},
+		// The harness injects its own deliverer, but the config must
+		// still pass Run's backend validation.
+		ExecCmd: []string{"true"},
 	}
 }
 
@@ -805,6 +817,57 @@ func TestSharedExpirySkipsOwnerWithoutCallback(t *testing.T) {
 	h.stop(t)
 }
 
+// TestSharedExpiryKeepsWatchWhenDeliveryFails: a failed expiry
+// delivery keeps the watch so it re-fires on the next sweep instead of
+// being lost. (A successful deliverer deletes the watch: see
+// TestSharedExpiryDeliversToCallback.)
+func TestSharedExpiryKeepsWatchWhenDeliveryFails(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Mode = ModeShared
+	cfg.Agent = "relay"
+
+	ran := filepath.Join(t.TempDir(), "ran.out")
+	script := filepath.Join(t.TempDir(), "callback.sh")
+	writeScript(t, script, "#!/bin/sh\necho fired >> "+ran+"\nexit 1\n")
+
+	h := startHarness(t, cfg)
+	if err := h.st.SetMeta(context.Background(), MetaDeliveryPrefix+"squire", script); err != nil {
+		t.Fatalf("set meta: %v", err)
+	}
+	bFalse := false
+	if _, err := h.st.AddWatch(context.Background(), store.Watch{
+		RoomID: "r1", Owner: "squire", Kind: "pattern",
+		Pattern: "deploy", Note: "waiting for deploy", Once: &bFalse,
+	}, 1, h.clock.Now()); err != nil {
+		t.Fatalf("add watch: %v", err)
+	}
+
+	h.clock.Advance(2 * time.Minute)
+	h.ticker.fire()
+
+	// The script's side effect proves the sweep delivered (and failed);
+	// the watch must survive for the next sweep.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		b, err := os.ReadFile(ran)
+		if err == nil && len(b) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("failing callback never ran; ran err = %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	ws, err := h.st.ListWatches(context.Background())
+	if err != nil {
+		t.Fatalf("list watches: %v", err)
+	}
+	if len(ws) != 1 {
+		t.Fatalf("watches after failed delivery = %d, want 1 (kept for the next sweep)", len(ws))
+	}
+	h.stop(t)
+}
+
 // --- restart drain ---
 
 func TestRestartDrainsQueuedWake(t *testing.T) {
@@ -873,14 +936,34 @@ func TestRunValidatesConfig(t *testing.T) {
 	if err := Run(context.Background(), Config{Deliver: "bogus"}, deps); err == nil {
 		t.Error("unknown deliver: Run = nil, want error")
 	}
-	if err := Run(context.Background(), Config{Deliver: "exec"}, deps); err == nil {
-		t.Error("exec without ExecCmd: Run = nil, want error")
+	// exec without ExecCmd: Run rejects the backend before it dials,
+	// so the error names the missing exec command (no server needed).
+	if err := Run(context.Background(), Config{URL: "ws://apron.test/ws", Token: "tok", Deliver: "exec"}, deps); err == nil || !strings.Contains(err.Error(), "exec command") {
+		t.Errorf("exec without ExecCmd: Run = %v, want the ValidateBackend error naming the exec command", err)
 	}
 	if err := Run(context.Background(), baseCfg(), Deps{Deliver: newFakeDeliverer()}); err == nil {
 		t.Error("nil store: Run = nil, want error")
 	}
 	if err := Run(context.Background(), baseCfg(), Deps{Store: deps.Store}); err == nil {
 		t.Error("nil deliverer: Run = nil, want error")
+	}
+}
+
+// TestRunValidatesBackendBeforeConnect: a backend Run cannot serve is
+// rejected before the apron connection is attempted: no server is
+// needed, and the error names the missing piece.
+func TestRunValidatesBackendBeforeConnect(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	deps := Deps{Store: st, Deliver: newFakeDeliverer()}
+	if err := Run(context.Background(), Config{URL: "ws://apron.test/ws", Token: "tok", Deliver: "exec"}, deps); err == nil || !strings.Contains(err.Error(), "exec command") {
+		t.Errorf("exec without ExecCmd: Run = %v, want the ValidateBackend error naming the exec command", err)
+	}
+	if err := Run(context.Background(), Config{URL: "ws://apron.test/ws", Token: "tok", Deliver: "socket"}, deps); err == nil || !strings.Contains(err.Error(), "socket URL") {
+		t.Errorf("socket without SocketURL: Run = %v, want the ValidateBackend error naming the socket URL", err)
 	}
 }
 
