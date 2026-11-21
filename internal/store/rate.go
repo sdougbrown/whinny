@@ -36,6 +36,28 @@ func parseRateLast(v int64) time.Time {
 	return time.Unix(0, v)
 }
 
+// decodeRateState decodes the persisted rate-bucket pair: the token
+// count and the last-refill instant. An empty string is an unset
+// value (zero).
+func decodeRateState(tokStr, lastStr string) (rate.State, error) {
+	var state rate.State
+	if tokStr != "" {
+		tokens, err := strconv.ParseFloat(tokStr, 64)
+		if err != nil {
+			return rate.State{}, err
+		}
+		state.Tokens = tokens
+	}
+	if lastStr != "" {
+		nano, err := strconv.ParseInt(lastStr, 10, 64)
+		if err != nil {
+			return rate.State{}, err
+		}
+		state.Last = parseRateLast(nano)
+	}
+	return state, nil
+}
+
 // RateState returns the persisted rate-bucket state: the token count
 // and the last-refill instant. A store that has never had the state
 // set returns (0, a zero time, nil).
@@ -48,22 +70,11 @@ func (s *Store) RateState(ctx context.Context) (float64, time.Time, error) {
 	if err != nil {
 		return 0, time.Time{}, err
 	}
-	var tokens float64
-	var last time.Time
-	if tokStr != "" {
-		tokens, err = strconv.ParseFloat(tokStr, 64)
-		if err != nil {
-			return 0, time.Time{}, err
-		}
+	state, err := decodeRateState(tokStr, lastStr)
+	if err != nil {
+		return 0, time.Time{}, err
 	}
-	if lastStr != "" {
-		nano, err := strconv.ParseInt(lastStr, 10, 64)
-		if err != nil {
-			return 0, time.Time{}, err
-		}
-		last = parseRateLast(nano)
-	}
-	return tokens, last, nil
+	return state.Tokens, state.Last, nil
 }
 
 // SetRateState persists the rate-bucket state atomically: both meta
@@ -130,19 +141,9 @@ func (s *Store) TakeRateToken(ctx context.Context, perMinute int, now time.Time)
 	if err := conn.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, MetaRateLast).Scan(&lastStr); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, time.Second, err
 	}
-	var state rate.State
-	if tokStr != "" {
-		state.Tokens, err = strconv.ParseFloat(tokStr, 64)
-		if err != nil {
-			return false, time.Second, err
-		}
-	}
-	if lastStr != "" {
-		nano, err := strconv.ParseInt(lastStr, 10, 64)
-		if err != nil {
-			return false, time.Second, err
-		}
-		state.Last = parseRateLast(nano)
+	state, err := decodeRateState(tokStr, lastStr)
+	if err != nil {
+		return false, time.Second, err
 	}
 	state, ok := rate.Refill(state, perMinute, now)
 	if !ok {
