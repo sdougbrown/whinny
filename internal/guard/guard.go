@@ -137,6 +137,10 @@ type RateBucket struct {
 	cap    float64
 	refill time.Duration
 	last   time.Time
+	// onTake, when set, is called after every successful Take with the
+	// bucket's current state; the hook's error is dropped (the in-memory
+	// state stays authoritative for the process).
+	onTake func(tokens float64, last time.Time) error
 }
 
 // NewRateBucket builds a bucket from cfg, starting full. A non-positive
@@ -150,6 +154,29 @@ func NewRateBucket(cfg Config) *RateBucket {
 		cap:    float64(cfg.PerMinute),
 		refill: time.Minute / time.Duration(cfg.PerMinute),
 	}
+}
+
+// NewPersistedBucket builds a RateBucket whose state loads at
+// construction and saves after each successful Take. A load error or a
+// never-set state (a zero last instant) leaves the bucket full; a save
+// error is dropped (the in-memory state stays authoritative for the
+// process). The bucket is a RateBucket, so it satisfies whatever the
+// chain's GuardInput.Bucket expects.
+func NewPersistedBucket(load func() (float64, time.Time, error), save func(float64, time.Time) error, perMinute int) *RateBucket {
+	b := NewRateBucket(Config{PerMinute: perMinute})
+	if tokens, last, err := load(); err == nil && !last.IsZero() {
+		b.mu.Lock()
+		b.tokens = tokens
+		b.last = last
+		b.mu.Unlock()
+	}
+	b.onTake = func(tokens float64, last time.Time) error {
+		if save == nil {
+			return nil
+		}
+		return save(tokens, last)
+	}
+	return b
 }
 
 // CanServe reports whether a token is available at now without consuming
@@ -179,6 +206,9 @@ func (b *RateBucket) Take(now time.Time) (bool, time.Duration) {
 	b.refillTo(now)
 	if b.tokens >= 1-1e-9 {
 		b.tokens--
+		if b.onTake != nil {
+			b.onTake(b.tokens, b.last)
+		}
 		return true, 0
 	}
 	return false, time.Duration((1 - b.tokens) * b.refill.Seconds() * float64(time.Second))

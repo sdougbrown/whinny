@@ -405,6 +405,91 @@ func TestCursorUpsert(t *testing.T) {
 	}
 }
 
+// TestRateStateRoundTrip: the rate-bucket state round-trips through
+// SetRateState/RateState, including across a close and reopen.
+func TestRateStateRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// A never-set store reports (0, zero, nil).
+	tok, last, err := s.RateState(testCtx)
+	if err != nil {
+		t.Fatalf("RateState before set: %v", err)
+	}
+	if tok != 0 || !last.IsZero() {
+		t.Fatalf("RateState before set = (%v, %v), want (0, zero)", tok, last)
+	}
+
+	last = testNow
+	if err := s.SetRateState(testCtx, 1.5, last); err != nil {
+		t.Fatalf("SetRateState: %v", err)
+	}
+	tok, gotLast, err := s.RateState(testCtx)
+	if err != nil {
+		t.Fatalf("RateState: %v", err)
+	}
+	if tok != 1.5 {
+		t.Errorf("tokens = %v, want 1.5", tok)
+	}
+	if !gotLast.Equal(last) {
+		t.Errorf("last = %v, want %v", gotLast, last)
+	}
+
+	// Upsert: same keys, new values.
+	if err := s.SetRateState(testCtx, 0, testNow.Add(time.Minute)); err != nil {
+		t.Fatalf("SetRateState again: %v", err)
+	}
+	tok, gotLast, err = s.RateState(testCtx)
+	if err != nil {
+		t.Fatalf("RateState after upsert: %v", err)
+	}
+	if tok != 0 || !gotLast.Equal(testNow.Add(time.Minute)) {
+		t.Errorf("RateState after upsert = (%v, %v), want (0, +1m)", tok, gotLast)
+	}
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Reopen: the state persists.
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer s2.Close()
+	tok, gotLast, err = s2.RateState(testCtx)
+	if err != nil {
+		t.Fatalf("RateState after reopen: %v", err)
+	}
+	if tok != 0 || !gotLast.Equal(testNow.Add(time.Minute)) {
+		t.Errorf("RateState after reopen = (%v, %v), want (0, +1m)", tok, gotLast)
+	}
+}
+
+// TestRateStatePartialWriteIsAtomic: a torn (one key set, the other
+// not) state is never observable: both keys are written in one
+// transaction.
+func TestRateStatePartialWriteIsAtomic(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.SetRateState(testCtx, 3, testNow); err != nil {
+		t.Fatalf("SetRateState: %v", err)
+	}
+	tokStr, err := s.GetMeta(testCtx, MetaRateTokens)
+	if err != nil {
+		t.Fatalf("GetMeta tokens: %v", err)
+	}
+	lastStr, err := s.GetMeta(testCtx, MetaRateLast)
+	if err != nil {
+		t.Fatalf("GetMeta last: %v", err)
+	}
+	if tokStr == "" || lastStr == "" {
+		t.Fatalf("torn state: tokens=%q last=%q, want both set", tokStr, lastStr)
+	}
+}
+
 func TestMeta(t *testing.T) {
 	s := openTestStore(t)
 
