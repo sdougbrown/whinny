@@ -428,11 +428,12 @@ func (d *daemon) flushQueue(ctx context.Context) error {
 	return nil
 }
 
-// lookupAuthor resolves the reply target's author, retrying a failed
-// History lookup up to 3 times (1-second pause between attempts, each
-// attempt bounded by a 5-second timeout). It is a network call and runs
-// outside procMu (see handleRecord): holding the lock across the retry
-// would stall the live loop and catch-up. The room cursor advances
+// lookupAuthor resolves the reply target's author, making up to
+// maxAttempts History calls (1 initial + 3 retries, a 1-second pause
+// between attempts, each attempt bounded by a 5-second timeout). It is
+// a network call and runs outside procMu (see handleRecord): holding
+// the lock across the retry would stall the live loop and catch-up.
+// The room cursor advances
 // after the lookup (regardless of its outcome), so catch-up will not
 // replay the message; a lost lookup loses the reply wake (at-most-once,
 // documented). The bounded retry narrows the window.
