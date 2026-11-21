@@ -260,25 +260,34 @@ func (d *daemon) catchUp(ctx context.Context) {
 // resolution: the reply-author lookup (a network call with a bounded
 // retry) runs outside procMu — holding the lock across it would stall
 // the live loop and catch-up. The author is pre-resolved before the
-// lock, only for messages that carry a reply_to (the only path that
-// needs the author). procMu is then held only across the cursor
-// check-then-act dedupe, evaluation, and enqueue; delivery (the queue
-// flush and shared callbacks) runs after the lock is released so a
-// slow deliverer cannot stall live processing or catch-up.
+// lock, only when the resident evaluation will actually need it: a
+// non-self reply in resident mode that is not a duplicate (a shared
+// daemon never wakes on replies, a self-post never wakes via reply,
+// and a duplicate is skipped by the dedupe). procMu is then held only
+// across the cursor check-then-act dedupe, evaluation, and enqueue;
+// delivery (the queue flush and shared callbacks) runs after the lock
+// is released so a slow deliverer cannot stall live processing or
+// catch-up.
 func (d *daemon) handleRecord(ctx context.Context, rec apronws.Record, subscribe bool) {
 	if rec.Kind != apronws.KindMessage || rec.Message == nil {
 		return
 	}
 	m := rec.Message
 	// Pre-resolve the reply target's author outside procMu (see the
-	// comment above). Only a reply_to needs the author. The dedupe
-	// check-then-act below runs entirely under procMu, so no re-check
-	// is needed: the lookup never runs while the lock is held.
+	// comment above), only when the resident evaluation will need it:
+	// resident mode (a shared daemon never wakes on replies), a
+	// non-self sender (a self-post never wakes via reply), and a
+	// message past the room cursor (a duplicate is skipped by the
+	// check-then-act under procMu; the cursor only moves forward, so
+	// a message at or below it now is one at or below it then).
 	var author string
 	var authorOK bool
 	var authorErr error
-	if m.ReplyTo != nil {
-		author, authorOK, authorErr = d.lookupAuthor(ctx, m.RoomID, m.ReplyTo.MessageID)
+	if d.cfg.Mode == ModeResident && m.ReplyTo != nil && m.From.UserID != d.cfg.Self.UserID {
+		cursor, err := d.store.GetCursor(ctx, m.RoomID)
+		if err != nil || int64(m.LogID) > cursor {
+			author, authorOK, authorErr = d.lookupAuthor(ctx, m.RoomID, m.ReplyTo.MessageID)
+		}
 	}
 	d.procMu.Lock()
 	deliveries, flush := d.processRecord(ctx, m, subscribe, author, authorOK, authorErr)

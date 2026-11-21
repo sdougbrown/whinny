@@ -1184,6 +1184,9 @@ func TestHistoryCacheFedByStream(t *testing.T) {
 	if !strings.Contains(d.env.Text, "kind=reply") {
 		t.Errorf("reply envelope = %q, want a reply wake (author from the cache)", d.env.Text)
 	}
+	if n := h.srv.HistoryCallCount(); n != 0 {
+		t.Errorf("history lookups = %d, want 0 (the stream cache resolved the author)", n)
+	}
 	h.stop(t)
 }
 
@@ -1215,6 +1218,9 @@ func TestHistoryCacheMissFallsBackToHistory(t *testing.T) {
 	d := h.dlv.wait(t)
 	if !strings.Contains(d.env.Text, "kind=reply") {
 		t.Errorf("reply envelope = %q, want a reply wake (author from the History fallback)", d.env.Text)
+	}
+	if n := h.srv.HistoryCallCount(); n == 0 {
+		t.Error("history lookups = 0, want >= 1 (the fallback ran)")
 	}
 	h.stop(t)
 }
@@ -1305,5 +1311,47 @@ func TestSlowDelivererDoesNotBlockRecordProcessing(t *testing.T) {
 
 	// Release the blocked deliveries and shut down.
 	close(bd.block)
+	h.stop(t)
+}
+
+// --- Fix 8: the reply pre-resolve is gated (resident + non-self, not a duplicate) ---
+
+// TestSharedModeReplyNoHistoryLookup: a shared daemon never wakes on
+// replies, so a reply_to message must not trigger the History lookup.
+func TestSharedModeReplyNoHistoryLookup(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Mode = ModeShared
+	h := startHarness(t, cfg)
+
+	h.fc.Push("message", map[string]any{
+		"message_id": "m1", "log_id": 1, "room_id": "r1",
+		"from":     map[string]any{"user_id": "doug", "name": "doug"},
+		"body":     map[string]any{"text": "reply"},
+		"reply_to": map[string]any{"message_id": "m0"},
+	})
+	waitSettled(t, h, 0, "shared mode never wakes on replies")
+	if n := h.srv.HistoryCallCount(); n != 0 {
+		t.Errorf("history lookups = %d, want 0 (shared mode)", n)
+	}
+	h.stop(t)
+}
+
+// TestSelfPostReplyNoHistoryLookup: a self-post never wakes via reply,
+// so its reply_to must not trigger the History lookup (the thread
+// subscription still arms: no lookup is needed for it).
+func TestSelfPostReplyNoHistoryLookup(t *testing.T) {
+	cfg := baseCfg()
+	h := startHarness(t, cfg)
+
+	h.fc.Push("message", map[string]any{
+		"message_id": "m1", "log_id": 1, "room_id": "r1",
+		"from":     map[string]any{"user_id": "u9", "name": "squire"},
+		"body":     map[string]any{"text": "self reply"},
+		"reply_to": map[string]any{"message_id": "m0"},
+	})
+	waitSettled(t, h, 0, "a self-post never wakes via reply")
+	if n := h.srv.HistoryCallCount(); n != 0 {
+		t.Errorf("history lookups = %d, want 0 (self-post)", n)
+	}
 	h.stop(t)
 }
