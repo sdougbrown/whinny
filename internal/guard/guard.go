@@ -3,6 +3,7 @@ package guard
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -159,6 +160,9 @@ type RateBucket struct {
 	// with a 1s retry-after. The chain checks breaker and quiet BEFORE
 	// the take, so a quiet denial never consumes a token.
 	takeFn func(now time.Time) (ok bool, retryAfter time.Duration, err error)
+	// refundFn, when set, performs the store-backed refund (load, +1
+	// capped at cap, save) through the store's rate-state helpers.
+	refundFn func() error
 }
 
 // NewRateBucket builds a bucket from cfg, starting full. A non-positive
@@ -185,6 +189,17 @@ func NewStoreBucket(s *store.Store, perMinute int) *RateBucket {
 	b := NewRateBucket(Config{PerMinute: perMinute})
 	b.takeFn = func(now time.Time) (bool, time.Duration, error) {
 		return s.TakeRateToken(context.Background(), perMinute, now)
+	}
+	b.refundFn = func() error {
+		tokens, last, err := s.RateState(context.Background())
+		if err != nil {
+			return err
+		}
+		tokens += 1
+		if tokens > float64(perMinute) {
+			tokens = float64(perMinute)
+		}
+		return s.SetRateState(context.Background(), tokens, last)
 	}
 	return b
 }
@@ -233,4 +248,29 @@ func (b *RateBucket) Take(now time.Time) (bool, time.Duration, error) {
 		b.tokens, b.last = st.Tokens, st.Last
 	}
 	return ok, wait, nil
+}
+
+// Refund returns one previously-taken token to the bucket. In-memory,
+// the (+1 capped at cap) is one mutex hold. Store-backed (refundFn
+// set), the (load, +1 capped at cap, save) runs through the store's
+// rate-state helpers; it is best-effort — a persistence error is
+// logged, not returned — and carries a small cross-process race: the
+// load and save are separate, so a concurrent take in another process
+// can be overwritten by the refund's write-back.
+func (b *RateBucket) Refund() {
+	if b.refundFn != nil {
+		if err := b.refundFn(); err != nil {
+			log.Printf("whinny: rate refund: %v", err)
+		}
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.cap <= 0 {
+		return
+	}
+	b.tokens += 1
+	if b.tokens > b.cap {
+		b.tokens = b.cap
+	}
 }

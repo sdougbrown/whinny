@@ -10,6 +10,7 @@ import (
 	"github.com/sdougbrown/cli-contract"
 	"github.com/sdougbrown/whinny/internal/apronws"
 	"github.com/sdougbrown/whinny/internal/guard"
+	"github.com/sdougbrown/whinny/internal/store"
 )
 
 // DefaultRatePerMinute is the send-path rate limit when
@@ -46,11 +47,22 @@ func PostHandler(d Deps) clicontract.HandleFunc {
 		}
 		// Guard: evaluate the send-path guard chain before connecting.
 		// A denial is a non-zero exit carrying the typed denial text.
-		if err := d.guard(ctx); err != nil {
+		// The store stays open for the whole handler so a failed send
+		// can refund the consumed rate token.
+		st, err := d.store()
+		if err != nil {
+			return nil, err
+		}
+		if d.Store == nil {
+			defer st.Close()
+		}
+		bucket, err := d.guard(ctx, st)
+		if err != nil {
 			return nil, err
 		}
 		client, owned, err := d.connect(ctx, inv)
 		if err != nil {
+			bucket.Refund()
 			return nil, err
 		}
 		if owned {
@@ -58,10 +70,12 @@ func PostHandler(d Deps) clicontract.HandleFunc {
 		}
 		rooms, err := client.RoomList(ctx, apronws.RoomListParams{})
 		if err != nil {
+			bucket.Refund()
 			return nil, OperationalErrorf("room list: %v", err)
 		}
 		room, err := ResolveRoom(rooms.Joined, rooms.NotJoined, inv.Flags["room"])
 		if err != nil {
+			bucket.Refund()
 			return nil, err
 		}
 		postRoom := room.ID
@@ -72,6 +86,7 @@ func PostHandler(d Deps) clicontract.HandleFunc {
 				Title:        threadTitle(text),
 			})
 			if err != nil {
+				bucket.Refund()
 				return nil, OperationalErrorf("create thread: %v", err)
 			}
 			postRoom = t.ID
@@ -90,8 +105,11 @@ func PostHandler(d Deps) clicontract.HandleFunc {
 			ReplyTo: rt,
 		})
 		if err != nil {
+			bucket.Refund()
 			return nil, OperationalErrorf("post: %v", err)
 		}
+		// The send is confirmed; a JoinRoom failure is after the
+		// confirmed send, so no refund.
 		if err := client.JoinRoom(ctx, postRoom); err != nil {
 			return nil, OperationalErrorf("join %s: %v", postRoom, err)
 		}
@@ -109,38 +127,32 @@ func PostHandler(d Deps) clicontract.HandleFunc {
 // guard evaluates the send-path guard chain before a post connects:
 // the persisted breaker, the persisted rate bucket, and the quiet gate.
 // A denial returns the typed denial text as an operational error
-// (non-zero exit); an allowed send leaves the consumed bucket state
-// persisted by the bucket's save hook.
-func (d Deps) guard(ctx context.Context) error {
-	st, err := d.store()
-	if err != nil {
-		return err
-	}
-	if d.Store == nil {
-		defer st.Close()
-	}
+// (non-zero exit) and a nil bucket (no token was consumed); an allowed
+// send returns the bucket so a failed send can refund the consumed
+// token. The caller owns the store's lifecycle.
+func (d Deps) guard(ctx context.Context, st *store.Store) (*guard.RateBucket, error) {
 	brk, err := st.GetBreaker(ctx)
 	if err != nil {
-		return OperationalErrorf("breaker: %v", err)
+		return nil, OperationalErrorf("breaker: %v", err)
 	}
 	perMinute := DefaultRatePerMinute
 	if v := d.env()("WHINNY_RATE_PER_MINUTE"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {
-			return UsageErrorf("post: WHINNY_RATE_PER_MINUTE must be a positive integer, got %q", v)
+			return nil, UsageErrorf("post: WHINNY_RATE_PER_MINUTE must be a positive integer, got %q", v)
 		}
 		perMinute = n
 	}
 	bucket := guard.NewStoreBucket(st, perMinute)
 	quietStr, err := st.GetMeta(ctx, MetaQuietUntil)
 	if err != nil {
-		return OperationalErrorf("quiet: %v", err)
+		return nil, OperationalErrorf("quiet: %v", err)
 	}
 	var quietUntil int64
 	if quietStr != "" {
 		quietUntil, err = strconv.ParseInt(quietStr, 10, 64)
 		if err != nil {
-			return OperationalErrorf("quiet_until: %v", err)
+			return nil, OperationalErrorf("quiet_until: %v", err)
 		}
 	}
 	chain := guard.NewChain(guard.Config{PerMinute: perMinute})
@@ -152,9 +164,9 @@ func (d Deps) guard(ctx context.Context) error {
 		Now:            d.now(),
 	})
 	if denied {
-		return OperationalErrorf("%s: %s", denial.Kind, denial.Text)
+		return nil, OperationalErrorf("%s: %s", denial.Kind, denial.Text)
 	}
-	return nil
+	return bucket, nil
 }
 
 // threadTitle is the first line of the text, truncated to 80 runes.

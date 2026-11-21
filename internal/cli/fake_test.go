@@ -19,9 +19,13 @@ type fakeClient struct {
 	postID      string
 	threadID    string
 	closeCalls  int
+	postErr     error
 }
 
 func (f *fakeClient) PostMessage(_ context.Context, p apronws.PostParams) (apronws.PostResult, error) {
+	if f.postErr != nil {
+		return apronws.PostResult{}, f.postErr
+	}
 	f.posts = append(f.posts, p)
 	return apronws.PostResult{MessageID: f.postID}, nil
 }

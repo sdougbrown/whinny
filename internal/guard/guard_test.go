@@ -376,3 +376,61 @@ func TestStoreBucketFailsClosed(t *testing.T) {
 		t.Errorf("RetryAfter = %v, want 1s", d.RetryAfter)
 	}
 }
+
+// TestRefundInMemory: a refund returns a taken token to an in-memory
+// bucket (capped at capacity), so a drained bucket admits a send again.
+func TestRefundInMemory(t *testing.T) {
+	b := NewRateBucket(Config{PerMinute: 1})
+	if ok, _, _ := b.Take(t0); !ok {
+		t.Fatal("Take failed")
+	}
+	// Drained: the next take is denied.
+	if ok, _, _ := b.Take(t0); ok {
+		t.Fatal("Take on a drained bucket succeeded, want denied")
+	}
+	// Refund the taken token.
+	b.Refund()
+	// The refunded token is available again.
+	if ok, _, _ := b.Take(t0); !ok {
+		t.Fatal("Take after Refund failed, want the refunded token")
+	}
+	// A refund on a full bucket is capped at capacity: it does not
+	// over-fill.
+	b2 := NewRateBucket(Config{PerMinute: 1})
+	b2.Refund()
+	if ok, _, _ := b2.Take(t0); !ok {
+		t.Fatal("b2 Take failed, want the full bucket")
+	}
+	if ok, _, _ := b2.Take(t0); ok {
+		t.Fatal("b2 second Take succeeded, want capped at capacity")
+	}
+}
+
+// TestRefundStoreBucket: a refund on a store-backed bucket returns the
+// taken token to the persisted state, so a second bucket on the same
+// store sees the refunded (full) state.
+func TestRefundStoreBucket(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	s, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer s.Close()
+
+	b := NewStoreBucket(s, 1)
+	if ok, _, _ := b.Take(t0); !ok {
+		t.Fatal("Take failed")
+	}
+	// The take persisted: a second bucket on the same store is empty.
+	b2 := NewStoreBucket(s, 1)
+	if ok, _, _ := b2.Take(t0); ok {
+		t.Fatal("second bucket Take succeeded, want the consumed state")
+	}
+	// Refund the taken token.
+	b.Refund()
+	// The refund persisted: a third bucket on the same store is full.
+	b3 := NewStoreBucket(s, 1)
+	if ok, _, _ := b3.Take(t0); !ok {
+		t.Fatal("third bucket Take failed, want the refunded (full) state")
+	}
+}

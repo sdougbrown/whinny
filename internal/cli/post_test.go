@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"io"
 	"path/filepath"
 	"strings"
@@ -334,5 +335,81 @@ func TestPostRefusesWhenQuiet(t *testing.T) {
 	}
 	if len(c.posts) != 0 {
 		t.Fatalf("posts = %d, want 0 (no send while quiet)", len(c.posts))
+	}
+}
+
+// TestPostRefundsRateTokenWhenPostFails: a post that fails after the
+// guard's take refunds the consumed token, so a second post is allowed.
+func TestPostRefundsRateTokenWhenPostFails(t *testing.T) {
+	c := &fakeClient{
+		joined:  []apronws.Room{{ID: "r1", Title: "General"}},
+		postID:  "msg-1",
+		postErr: errors.New("send failed"),
+	}
+	d := postDeps(t, c)
+	d.Env = func(k string) string {
+		if k == "WHINNY_RATE_PER_MINUTE" {
+			return "1"
+		}
+		return ""
+	}
+	now := time.Unix(2_000_000, 0)
+	d.Now = func() time.Time { return now }
+
+	// First post: the guard takes the only token, the send fails, and
+	// the token is refunded.
+	_, err := PostHandler(d)(context.Background(),
+		inv("post", []string{"hello"}, map[string]string{"room": "r1"}, nil), io.Discard)
+	if err == nil {
+		t.Fatal("want a send failure, got nil")
+	}
+	tok, _, err := d.Store.RateState(context.Background())
+	if err != nil {
+		t.Fatalf("RateState: %v", err)
+	}
+	if tok != 1 {
+		t.Fatalf("tokens = %v, want 1 (refunded after a failed send)", tok)
+	}
+	// Second post: the refunded token is available, so it succeeds.
+	c.postErr = nil
+	if _, err := PostHandler(d)(context.Background(),
+		inv("post", []string{"hello"}, map[string]string{"room": "r1"}, nil), io.Discard); err != nil {
+		t.Fatalf("second post: %v", err)
+	}
+}
+
+// TestPostRefundsRateTokenWhenConnectFails: a post that fails to
+// connect after the guard's take refunds the consumed token.
+func TestPostRefundsRateTokenWhenConnectFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	s, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	d := Deps{
+		Store: s,
+		Env: func(k string) string {
+			if k == "WHINNY_RATE_PER_MINUTE" {
+				return "1"
+			}
+			return ""
+		},
+		Now: func() time.Time { return time.Unix(2_000_000, 0) },
+		Connect: func(ctx context.Context, cfg Config) (RoomClient, error) {
+			return nil, errors.New("connect failed")
+		},
+	}
+	_, err = PostHandler(d)(context.Background(),
+		inv("post", []string{"hello"}, map[string]string{"room": "r1"}, nil), io.Discard)
+	if err == nil {
+		t.Fatal("want a connect failure, got nil")
+	}
+	tok, _, err := s.RateState(context.Background())
+	if err != nil {
+		t.Fatalf("RateState: %v", err)
+	}
+	if tok != 1 {
+		t.Fatalf("tokens = %v, want 1 (refunded after a failed connect)", tok)
 	}
 }
