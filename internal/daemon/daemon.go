@@ -303,11 +303,13 @@ func (d *daemon) handleResident(ctx context.Context, m *apronws.Message) {
 		}
 	}
 	dec := wake.Evaluate(ctx, wake.In{
-		Msg:        msg,
-		Self:       d.cfg.Self,
-		Peers:      d.cfg.Peers,
-		Watches:    resident,
-		History:    func(ctx context.Context, messageID string) (string, bool, error) { return d.hist.lookup(ctx, m.RoomID, messageID) },
+		Msg:     msg,
+		Self:    d.cfg.Self,
+		Peers:   d.cfg.Peers,
+		Watches: resident,
+		History: func(ctx context.Context, messageID string) (string, bool, error) {
+			return d.hist.lookup(ctx, m.RoomID, messageID)
+		},
 		Classifier: d.class,
 		Gate:       d.gate,
 		Clock:      d.clock,

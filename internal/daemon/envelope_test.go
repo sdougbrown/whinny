@@ -3,8 +3,8 @@ package daemon
 import (
 	"testing"
 
-	"github.com/sdougbrown/whinny/internal/watch"
 	"github.com/sdougbrown/whinny/internal/wake"
+	"github.com/sdougbrown/whinny/internal/watch"
 )
 
 func TestBuildEnvelope(t *testing.T) {

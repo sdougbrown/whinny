@@ -38,10 +38,10 @@ type serverConn struct {
 }
 
 type fakeServer struct {
-	ts            *httptest.Server
-	mu            sync.Mutex
-	conns         []*serverConn
-	newC          chan struct{}
+	ts    *httptest.Server
+	mu    sync.Mutex
+	conns []*serverConn
+	newC  chan struct{}
 	// joinedRooms is the room_list response's joined list; nil means
 	// none (the catch-up finds no rooms to replay).
 	joinedRooms []map[string]any
@@ -196,8 +196,8 @@ func (fc *serverConn) pushMessage(id, room, from, text string, mentions []string
 		"message_id": id,
 		"log_id":     time.Now().UnixNano(),
 		"room_id":    room,
-		"from":        map[string]any{"user_id": from, "name": from},
-		"body":        body,
+		"from":       map[string]any{"user_id": from, "name": from},
+		"body":       body,
 	})
 }
 
@@ -211,8 +211,8 @@ func (fc *serverConn) pushMessageAt(id, room, from, text string, mentions []stri
 		"message_id": id,
 		"log_id":     logID,
 		"room_id":    room,
-		"from":        map[string]any{"user_id": from, "name": from},
-		"body":        body,
+		"from":       map[string]any{"user_id": from, "name": from},
+		"body":       body,
 	})
 }
 
