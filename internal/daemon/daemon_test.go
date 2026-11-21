@@ -124,7 +124,7 @@ func (fc *serverConn) write(b []byte) {
 func (fc *serverConn) handshake() error {
 	server, _ := json.Marshal(map[string]any{
 		"method": "server",
-		"data":   map[string]any{"apron": 9, "agent": "fake", "ping": 30},
+		"params": map[string]any{"apron": 9, "agent": "fake", "ping": 30},
 	})
 	fc.write(server)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -150,7 +150,7 @@ func (fc *serverConn) handshake() error {
 
 // push sends a push frame to the client.
 func (fc *serverConn) push(method string, payload any) {
-	b, _ := json.Marshal(map[string]any{"method": method, "data": payload})
+	b, _ := json.Marshal(map[string]any{"method": method, "params": payload})
 	fc.write(b)
 }
 

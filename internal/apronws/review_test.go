@@ -171,7 +171,7 @@ func TestBackpressure(t *testing.T) {
 
 	// Fill the 256-buffer and one more; the 257th stalls the read loop.
 	for i := 0; i < 257; i++ {
-		if err := fc.sendFrame(map[string]any{"method": "activity", "data": map[string]any{"i": i}}); err != nil {
+		if err := fc.sendFrame(map[string]any{"method": "activity", "params": map[string]any{"i": i}}); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -310,7 +310,6 @@ type wireFrame struct {
 	Params json.RawMessage `json:"params,omitempty"`
 	Result json.RawMessage `json:"result,omitempty"`
 	Error  *wireError      `json:"error,omitempty"`
-	Data   json.RawMessage `json:"data,omitempty"`
 }
 
 type authParams struct {
@@ -410,7 +409,7 @@ func (c *Client) handshake(ctx context.Context) error {
 			continue
 		}
 		if f.Method == "server" {
-			info, err := decodeServerInfo(f.Data)
+			info, err := decodeServerInfo(f.Params)
 			if err != nil {
 				c.abortConn()
 				return err
@@ -679,7 +678,7 @@ func (c *Client) dispatchPush(f wireFrame) {
 		}
 		return
 	}
-	rec, ok := decodePush(f.Method, f.Data)
+	rec, ok := decodePush(f.Method, f.Params)
 	if !ok {
 		return
 	}

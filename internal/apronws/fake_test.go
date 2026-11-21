@@ -22,7 +22,6 @@ type testFrame struct {
 	Params json.RawMessage `json:"params"`
 	Result json.RawMessage `json:"result"`
 	Error  json.RawMessage `json:"error"`
-	Data   json.RawMessage `json:"data"`
 }
 
 // fakeConn is one accepted WebSocket connection on a fakeServer.
@@ -194,7 +193,7 @@ func (fc *fakeConn) waitForClose() error {
 func (fc *fakeConn) handshake(ctx context.Context, ping int) error {
 	if err := fc.sendFrame(map[string]any{
 		"method": "server",
-		"data": map[string]any{
+		"params": map[string]any{
 			"apron":        9,
 			"agent":        "fake",
 			"capabilities": []string{"history"},

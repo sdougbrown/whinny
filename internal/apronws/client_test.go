@@ -254,12 +254,12 @@ func TestPushDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fc.sendFrame(map[string]any{"method": "frobnicate", "data": map[string]any{}}); err != nil {
+	if err := fc.sendFrame(map[string]any{"method": "frobnicate", "params": map[string]any{}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := fc.sendFrame(map[string]any{
 		"method": "message",
-		"data": map[string]any{
+		"params": map[string]any{
 			"message_id": "m9",
 			"log_id":     9,
 			"room_id":    "r1",
@@ -269,7 +269,7 @@ func TestPushDelivery(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := fc.sendFrame(map[string]any{"method": "room_update", "data": map[string]any{"kind": "joined", "room_id": "r2"}}); err != nil {
+	if err := fc.sendFrame(map[string]any{"method": "room_update", "params": map[string]any{"kind": "joined", "room_id": "r2"}}); err != nil {
 		t.Fatal(err)
 	}
 

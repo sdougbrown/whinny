@@ -65,7 +65,7 @@ func TestReconnect(t *testing.T) {
 	}
 	if err := fc2.sendFrame(map[string]any{
 		"method": "message",
-		"data": map[string]any{
+		"params": map[string]any{
 			"message_id": "m2",
 			"log_id":     2,
 			"room_id":    "r1",
