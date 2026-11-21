@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sdougbrown/cli-contract"
 	"github.com/sdougbrown/whinny/internal/cli"
@@ -89,5 +91,26 @@ func TestAdapterErrorResultRoomError(t *testing.T) {
 	}
 	if !strings.Contains(m["error"].(map[string]any)["message"].(string), "no room matches") {
 		t.Fatalf("message = %v, want the no-room-match text", m["error"])
+	}
+}
+
+// TestAdapterDeadline: an interactive command gets a ~60s deadline; the
+// daemon (a Raw handler) is left unbounded.
+func TestAdapterDeadline(t *testing.T) {
+	a := adapter{}
+	ctx, cancel := a.Deadline(context.Background(), clicontract.Invocation{Command: "post"})
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("post: want a deadline, got none")
+	}
+	d := time.Until(deadline)
+	if d <= 0 || d > 60*time.Second {
+		t.Fatalf("post deadline = %v, want ~60s", d)
+	}
+	dctx, dcancel := a.Deadline(context.Background(), clicontract.Invocation{Command: "daemon"})
+	defer dcancel()
+	if _, ok := dctx.Deadline(); ok {
+		t.Fatal("daemon: want no deadline, got one")
 	}
 }

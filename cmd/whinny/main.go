@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/sdougbrown/cli-contract"
 	"github.com/sdougbrown/whinny/internal/apronws"
@@ -72,8 +73,22 @@ func (adapter) ExitCode(_ clicontract.Invocation, _ any, handlerErr error) int {
 	return clicontract.ExitOK
 }
 
-func (adapter) Deadline(ctx context.Context, _ clicontract.Invocation) (context.Context, context.CancelFunc) {
-	return ctx, func() {}
+// commandDeadline bounds every interactive (non-daemon) command. A server
+// that accepts a request but never replies must not hang the command
+// forever (apronws.Send blocks on the context).
+const commandDeadline = 60 * time.Second
+
+// Deadline decorates the run context before a handler runs. Interactive
+// commands (post, history, rooms, watch, quiet, resume) get a finite
+// deadline so a server that accepts a request but never replies cannot
+// hang the command forever. The daemon is a Raw handler: the library
+// never decorates a raw command's context, and Deadline explicitly leaves
+// it unbounded so the long-running wake daemon is never cut off.
+func (adapter) Deadline(ctx context.Context, inv clicontract.Invocation) (context.Context, context.CancelFunc) {
+	if inv.Command == "daemon" {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, commandDeadline)
 }
 
 func (adapter) BeforeHandler(_ clicontract.Invocation, _ io.Writer) {}
