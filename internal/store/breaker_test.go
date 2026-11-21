@@ -29,8 +29,18 @@ func TestBumpPostFailures(t *testing.T) {
 	if v != "0" {
 		t.Fatalf("post_failures = %q, want 0 after the reset", v)
 	}
-	if n, err := s.BumpPostFailures(testCtx); err != nil || n != 1 {
+	// The returned count is the persisted count (RETURNING, not a
+	// separate read-back).
+	n, err := s.BumpPostFailures(testCtx)
+	if err != nil || n != 1 {
 		t.Fatalf("BumpPostFailures after reset = (%d, %v), want (1, nil)", n, err)
+	}
+	v, err = s.GetMeta(testCtx, MetaPostFailures)
+	if err != nil {
+		t.Fatalf("GetMeta: %v", err)
+	}
+	if v != "1" {
+		t.Fatalf("post_failures = %q, want 1 (the returned count)", v)
 	}
 }
 

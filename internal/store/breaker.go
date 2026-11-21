@@ -63,21 +63,23 @@ func (s *Store) GetBreaker(ctx context.Context) (Breaker, error) {
 }
 
 // BumpPostFailures increments the consecutive post-failure count by
-// one and returns the new count. The increment is one upsert
-// (`value = value + 1`), so concurrent bumpers under the store's
-// write mutex — and cross-process writers under the database lock —
-// never lose an increment.
+// one and returns the new count. The increment and the returned count
+// are one upsert with RETURNING, so the count the caller acts on is
+// the one it wrote — a concurrent reset (in- or cross-process)
+// cannot commit between the write and a read-back and mask the
+// count. Concurrent bumpers under the store's write mutex — and
+// cross-process writers under the database lock — never lose an
+// increment.
 func (s *Store) BumpPostFailures(ctx context.Context) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO meta (key, value) VALUES (?, '1')
-		 ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1`,
-		MetaPostFailures); err != nil {
-		return 0, err
-	}
 	var v string
-	if err := s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, MetaPostFailures).Scan(&v); err != nil {
+	err := s.db.QueryRowContext(ctx,
+		`INSERT INTO meta (key, value) VALUES (?, '1')
+		 ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1
+		 RETURNING value`,
+		MetaPostFailures).Scan(&v)
+	if err != nil {
 		return 0, err
 	}
 	return strconv.Atoi(v)
