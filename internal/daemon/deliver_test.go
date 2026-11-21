@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,7 +83,8 @@ func TestFeedDelivererFetchesImage(t *testing.T) {
 	defer imgSrv.Close()
 
 	var buf bytes.Buffer
-	d := &feedDeliverer{out: &buf}
+	u, _ := url.Parse(imgSrv.URL)
+	d := &feedDeliverer{out: &buf, originScheme: u.Scheme, originHost: u.Host}
 	t.Cleanup(d.cleanup)
 	env := Envelope{Text: "with image", From: "u1", ImageURL: imgSrv.URL}
 	if err := d.Deliver(context.Background(), "agent", env); err != nil {
@@ -115,7 +117,8 @@ func TestFeedDelivererImageTooLarge(t *testing.T) {
 	defer imgSrv.Close()
 
 	var buf bytes.Buffer
-	d := &feedDeliverer{out: &buf}
+	u, _ := url.Parse(imgSrv.URL)
+	d := &feedDeliverer{out: &buf, originScheme: u.Scheme, originHost: u.Host}
 	t.Cleanup(d.cleanup)
 	env := Envelope{Text: "big", From: "u1", ImageURL: imgSrv.URL}
 	if err := d.Deliver(context.Background(), "agent", env); err != nil {
@@ -160,5 +163,134 @@ func TestSplitCommand(t *testing.T) {
 		if !eq {
 			t.Errorf("SplitCommand(%q) = %q, want %q", tt.in, got, tt.want)
 		}
+	}
+}
+
+// TestFeedDelivererRefusesCrossOrigin: a cross-origin image URL is
+// refused without a fetch (SSRF guard).
+func TestFeedDelivererRefusesCrossOrigin(t *testing.T) {
+	fetched := false
+	otherSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fetched = true
+		w.Write([]byte("x"))
+	}))
+	defer otherSrv.Close()
+
+	// The origin is a different host.
+	originSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	defer originSrv.Close()
+	ou, _ := url.Parse(originSrv.URL)
+
+	var buf bytes.Buffer
+	d := &feedDeliverer{out: &buf, originScheme: ou.Scheme, originHost: ou.Host}
+	t.Cleanup(d.cleanup)
+	env := Envelope{Text: "x", From: "u1", ImageURL: otherSrv.URL}
+	if err := d.Deliver(context.Background(), "agent", env); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	if fetched {
+		t.Error("cross-origin URL was fetched, want refused")
+	}
+	var rec FeedRecord
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if rec.Image != nil {
+		t.Errorf("record carried an image %+v, want none (refused)", rec.Image)
+	}
+}
+
+// TestFeedDelivererRefusesCrossOriginRedirect: a same-origin fetch that
+// redirects to a cross-origin URL is refused (the CheckRedirect guard).
+func TestFeedDelivererRefusesCrossOriginRedirect(t *testing.T) {
+	otherSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte("x"))
+	}))
+	defer otherSrv.Close()
+
+	// The origin server redirects to a cross-origin URL.
+	originSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, otherSrv.URL, http.StatusFound)
+	}))
+	defer originSrv.Close()
+	ou, _ := url.Parse(originSrv.URL)
+
+	var buf bytes.Buffer
+	d := &feedDeliverer{out: &buf, originScheme: ou.Scheme, originHost: ou.Host}
+	t.Cleanup(d.cleanup)
+	env := Envelope{Text: "x", From: "u1", ImageURL: originSrv.URL}
+	if err := d.Deliver(context.Background(), "agent", env); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	var rec FeedRecord
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if rec.Image != nil {
+		t.Errorf("record carried an image %+v, want none (cross-origin redirect refused)", rec.Image)
+	}
+}
+
+// TestFeedDelivererFollowsSameOriginRedirect: a same-origin redirect is
+// followed (the guard only refuses cross-origin).
+func TestFeedDelivererFollowsSameOriginRedirect(t *testing.T) {
+	png := append([]byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}, bytes.Repeat([]byte{0}, 100)...)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/redirect" {
+			http.Redirect(w, r, "/img", http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(png)
+	}))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+
+	var buf bytes.Buffer
+	d := &feedDeliverer{out: &buf, originScheme: u.Scheme, originHost: u.Host}
+	t.Cleanup(d.cleanup)
+	env := Envelope{Text: "x", From: "u1", ImageURL: srv.URL + "/redirect"}
+	if err := d.Deliver(context.Background(), "agent", env); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	var rec FeedRecord
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if rec.Image == nil {
+		t.Fatal("record has no image (same-origin redirect should be followed)")
+	}
+}
+
+// TestFeedDelivererTempDirCap: the image temp directory is capped at
+// maxImageFiles; the oldest is evicted before a new one is written.
+func TestFeedDelivererTempDirCap(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte{0x89, 'P', 'N', 'G'})
+	}))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+
+	var buf bytes.Buffer
+	d := &feedDeliverer{out: &buf, originScheme: u.Scheme, originHost: u.Host}
+	t.Cleanup(d.cleanup)
+	for i := 0; i < maxImageFiles+5; i++ {
+		env := Envelope{Text: "x", From: "u1", ImageURL: srv.URL}
+		if err := d.Deliver(context.Background(), "agent", env); err != nil {
+			t.Fatalf("Deliver %d: %v", i, err)
+		}
+	}
+	d.filesMu.Lock()
+	n := len(d.files)
+	d.filesMu.Unlock()
+	if n != maxImageFiles {
+		t.Errorf("files = %d, want %d (capped)", n, maxImageFiles)
+	}
+	entries, err := os.ReadDir(d.dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) > maxImageFiles {
+		t.Errorf("dir entries = %d, want <= %d", len(entries), maxImageFiles)
 	}
 }
