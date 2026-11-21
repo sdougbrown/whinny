@@ -1,9 +1,12 @@
 package guard
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/sdougbrown/whinny/internal/store"
 )
 
 // Denial kinds.
@@ -141,6 +144,18 @@ type RateBucket struct {
 	// bucket's current state; the hook's error is dropped (the in-memory
 	// state stays authoritative for the process).
 	onTake func(tokens float64, last time.Time) error
+	// takeFn, when set, makes CanServe perform the (refill, take,
+	// persist) as one atomic operation and Take a no-op. This is the
+	// store-backed path (NewStoreBucket): the check and the consume are
+	// one transaction, so a denial never leaves the bucket drained and a
+	// take is never lost to a concurrent caller. A persistence error
+	// denies (fail closed) with a 1s retry-after.
+	//
+	// Because the take happens in CanServe (before the quiet check), a
+	// quiet denial on a store-backed bucket consumes a token. That is the
+	// cost of atomicity: the take must be one transaction, and the chain's
+	// check-then-consume split cannot host it without a race.
+	takeFn func(now time.Time) (ok bool, retryAfter time.Duration, err error)
 }
 
 // NewRateBucket builds a bucket from cfg, starting full. A non-positive
@@ -162,6 +177,12 @@ func NewRateBucket(cfg Config) *RateBucket {
 // error is dropped (the in-memory state stays authoritative for the
 // process). The bucket is a RateBucket, so it satisfies whatever the
 // chain's GuardInput.Bucket expects.
+//
+// Deprecated: the load-then-save shape is two steps, so N concurrent
+// callers can each read a full bucket and all pass a perMinute limit,
+// and a save failure is dropped (fail open). Use NewStoreBucket for the
+// atomic, fail-closed path; this constructor is kept working for callers
+// that cannot yet move.
 func NewPersistedBucket(load func() (float64, time.Time, error), save func(float64, time.Time) error, perMinute int) *RateBucket {
 	b := NewRateBucket(Config{PerMinute: perMinute})
 	if tokens, last, err := load(); err == nil && !last.IsZero() {
@@ -179,10 +200,35 @@ func NewPersistedBucket(load func() (float64, time.Time, error), save func(float
 	return b
 }
 
+// NewStoreBucket builds a RateBucket backed by the store's atomic
+// TakeRateToken: the (refill, take, persist) is one BEGIN IMMEDIATE
+// transaction, so N concurrent callers can never all pass a perMinute
+// limit, and a persistence error denies (fail closed) with a 1s
+// retry-after. The take happens in CanServe (before the quiet check),
+// so a quiet denial consumes a token — the cost of atomicity. The store
+// call runs on context.Background: the bucket's API carries no context.
+func NewStoreBucket(s *store.Store, perMinute int) *RateBucket {
+	b := NewRateBucket(Config{PerMinute: perMinute})
+	b.takeFn = func(now time.Time) (bool, time.Duration, error) {
+		return s.TakeRateToken(context.Background(), perMinute, now)
+	}
+	return b
+}
+
 // CanServe reports whether a token is available at now without consuming
 // one. It refills first; the refill advances the bucket's clock but
-// never takes a token.
+// never takes a token. On a store-backed bucket (takeFn set), CanServe
+// is the atomic take: it refills, takes, and persists in one
+// transaction, and a persistence error denies (fail closed) with a 1s
+// retry-after.
 func (b *RateBucket) CanServe(now time.Time) (bool, time.Duration) {
+	if b.takeFn != nil {
+		ok, wait, err := b.takeFn(now)
+		if err != nil {
+			return false, time.Second
+		}
+		return ok, wait
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.cap <= 0 {
@@ -196,8 +242,13 @@ func (b *RateBucket) CanServe(now time.Time) (bool, time.Duration) {
 }
 
 // Take consumes one token at now, refilling first. It reports whether a
-// token was available and, if not, the wait until the next one.
+// token was available and, if not, the wait until the next one. On a
+// store-backed bucket (takeFn set), Take is a no-op: the take already
+// happened in CanServe.
 func (b *RateBucket) Take(now time.Time) (bool, time.Duration) {
+	if b.takeFn != nil {
+		return true, 0
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.cap <= 0 {

@@ -26,15 +26,18 @@ type Store struct {
 }
 
 // Open opens (creating if needed) the SQLite database at path, runs the
-// schema migrations, and enables WAL mode and foreign keys on every
-// connection. The default parameters are merged into any query string
-// the path already carries.
+// schema migrations, and enables WAL mode, foreign keys, and a busy
+// timeout on every connection. The busy timeout (5s) makes a concurrent
+// writer wait for the database lock instead of failing with SQLITE_BUSY,
+// which the atomic rate take and the daemon's single-writer model rely
+// on. The default parameters are merged into any query string the path
+// already carries.
 func Open(path string) (*Store, error) {
 	dsn := path
 	if strings.Contains(path, "?") {
-		dsn = path + "&_foreign_keys=on&_journal_mode=WAL"
+		dsn = path + "&_foreign_keys=on&_journal_mode=WAL&_busy_timeout=5000"
 	} else {
-		dsn = path + "?_foreign_keys=on&_journal_mode=WAL"
+		dsn = path + "?_foreign_keys=on&_journal_mode=WAL&_busy_timeout=5000"
 	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {

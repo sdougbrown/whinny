@@ -6,13 +6,15 @@ import (
 	"errors"
 )
 
-// SetCursor upserts the last-log-id cursor for roomID.
+// SetCursor upserts the last-log-id cursor for roomID, moving it only
+// forward: an incoming id below the stored cursor is ignored, so a
+// replayed or out-of-order message can never rewind the cursor.
 func (s *Store) SetCursor(ctx context.Context, roomID string, lastLogID int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO cursors (room_id, last_log_id) VALUES (?, ?)
-		 ON CONFLICT(room_id) DO UPDATE SET last_log_id = excluded.last_log_id`,
+		 ON CONFLICT(room_id) DO UPDATE SET last_log_id = MAX(last_log_id, excluded.last_log_id)`,
 		roomID, lastLogID)
 	return err
 }

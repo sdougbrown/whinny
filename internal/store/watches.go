@@ -163,6 +163,28 @@ func (s *Store) DueWatches(ctx context.Context, now time.Time) ([]Watch, error) 
 	return out, rows.Err()
 }
 
+// WatchesForRoom returns the room's unexpired watches (expires_at >
+// now.Unix()), oldest first. Already-expired watches are excluded so a
+// stale watch cannot fire on a message that arrives after its TTL.
+func (s *Store) WatchesForRoom(ctx context.Context, roomID string, now time.Time) ([]Watch, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, room_id, owner, kind, from_user, pattern, thread_id, reply_to, note, once, ttl_s, created_at, expires_at
+		 FROM watches WHERE room_id = ? AND expires_at > ? ORDER BY created_at, id`, roomID, now.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Watch
+	for rows.Next() {
+		w, err := scanWatch(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
 type scanner interface {
 	Scan(dest ...any) error
 }

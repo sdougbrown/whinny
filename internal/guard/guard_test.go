@@ -364,3 +364,56 @@ func TestBreakerFromReopenedStore(t *testing.T) {
 		t.Fatalf("Evaluate: (%+v, %v), want refused-breaker", d, denied)
 	}
 }
+
+// TestStoreBucketChain: a store-backed bucket (NewStoreBucket) drives
+// the chain's rate guard through the atomic TakeRateToken: two sends
+// drain a perMinute=2 bucket, the third is denied, and the state
+// persists (a second bucket on the same store sees the consumed state).
+func TestStoreBucketChain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	s, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer s.Close()
+
+	chain := NewChain(Config{PerMinute: 2})
+	b := NewStoreBucket(s, 2)
+	for i, want := range []bool{false, false, true} {
+		d, denied := chain.Evaluate(GuardInput{Bucket: b, Now: t0})
+		if denied != want {
+			t.Fatalf("Evaluate %d = denied %v, want %v (%+v)", i+1, denied, want, d)
+		}
+	}
+	// The state persisted: a second bucket on the same store is empty.
+	b2 := NewStoreBucket(s, 2)
+	if ok, wait := b2.CanServe(t0); ok || wait == 0 {
+		t.Errorf("second bucket CanServe = (%v, %v), want (false, non-zero) (state persisted)", ok, wait)
+	}
+}
+
+// TestStoreBucketFailsClosed: a persistence error (a closed store)
+// denies with refused-rate-limit and a 1s retry-after; a send is never
+// admitted on a storage failure.
+func TestStoreBucketFailsClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	s, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	chain := NewChain(Config{PerMinute: 2})
+	b := NewStoreBucket(s, 2)
+	d, denied := chain.Evaluate(GuardInput{Bucket: b, Now: t0})
+	if !denied {
+		t.Fatal("Evaluate with a closed store: allow path, want denial (fail closed)")
+	}
+	if d.Kind != KindRefusedRateLimit {
+		t.Errorf("Kind = %q, want %q", d.Kind, KindRefusedRateLimit)
+	}
+	if d.RetryAfter != time.Second {
+		t.Errorf("RetryAfter = %v, want 1s", d.RetryAfter)
+	}
+}

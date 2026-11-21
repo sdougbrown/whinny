@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -620,5 +621,262 @@ func TestOnceRoundTrip(t *testing.T) {
 	}
 	for _, w := range due {
 		check("DueWatches "+w.ID, w)
+	}
+}
+
+// TestTakeRateTokenParallel: N parallel TakeRateToken calls against one
+// store with perMinute=2 admit exactly 2 (the atomic take serializes
+// the read-modify-write, so the others see an empty bucket).
+func TestTakeRateTokenParallel(t *testing.T) {
+	s := openTestStore(t)
+	const n = 8
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	okCount := 0
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ok, _, err := s.TakeRateToken(testCtx, 2, testNow)
+			if err != nil {
+				t.Errorf("TakeRateToken: %v", err)
+				return
+			}
+			if ok {
+				mu.Lock()
+				okCount++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if okCount != 2 {
+		t.Errorf("okCount = %d, want 2 (perMinute=2)", okCount)
+	}
+	// A later call (after a refill period) admits again: the state was
+	// persisted.
+	later := testNow.Add(time.Minute)
+	ok, _, err := s.TakeRateToken(testCtx, 2, later)
+	if err != nil {
+		t.Fatalf("TakeRateToken later: %v", err)
+	}
+	if !ok {
+		t.Error("TakeRateToken later = false, want true (refilled)")
+	}
+}
+
+// TestTakeRateTokenRefill: a drained bucket refills over time and the
+// retry-after reflects the wait to the next token.
+func TestTakeRateTokenRefill(t *testing.T) {
+	s := openTestStore(t)
+	// Drain the 2/min bucket.
+	for i := 0; i < 2; i++ {
+		if ok, _, err := s.TakeRateToken(testCtx, 2, testNow); err != nil || !ok {
+			t.Fatalf("TakeRateToken %d: (%v, %v), want (true, nil)", i+1, ok, err)
+		}
+	}
+	// Empty: denied, with a 30s retry-after (1 token per 30s).
+	if ok, wait, err := s.TakeRateToken(testCtx, 2, testNow); err != nil || ok || wait != 30*time.Second {
+		t.Errorf("TakeRateToken empty = (%v, %v, %v), want (false, 30s, nil)", ok, wait, err)
+	}
+	// Half a refill period in: still denied, 15s to the next.
+	if ok, wait, _ := s.TakeRateToken(testCtx, 2, testNow.Add(15*time.Second)); ok || wait != 15*time.Second {
+		t.Errorf("TakeRateToken +15s = (%v, %v), want (false, 15s)", ok, wait)
+	}
+	// A full refill period in: admitted again.
+	if ok, _, err := s.TakeRateToken(testCtx, 2, testNow.Add(time.Minute)); err != nil || !ok {
+		t.Errorf("TakeRateToken +1m = (%v, %v), want (true, nil)", ok, err)
+	}
+}
+
+// TestTakeRateTokenPersistenceError: a persistence error denies (fail
+// closed) with a 1s retry-after; a send is never admitted on a storage
+// failure.
+func TestTakeRateTokenPersistenceError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := s.db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	ok, retryAfter, err := s.TakeRateToken(testCtx, 2, testNow)
+	if err == nil {
+		t.Error("TakeRateToken with a closed DB: err = nil, want an error (fail closed)")
+	}
+	if ok {
+		t.Error("TakeRateToken with a closed DB: ok = true, want false (fail closed)")
+	}
+	if retryAfter != time.Second {
+		t.Errorf("retryAfter = %v, want 1s", retryAfter)
+	}
+}
+
+// TestTakeRateTokenNonPositivePerMinute: a non-positive perMinute denies
+// (fail closed).
+func TestTakeRateTokenNonPositivePerMinute(t *testing.T) {
+	s := openTestStore(t)
+	for _, pm := range []int{0, -1} {
+		if ok, _, err := s.TakeRateToken(testCtx, pm, testNow); err != nil || ok {
+			t.Errorf("TakeRateToken perMinute=%d = (%v, %v), want (false, nil)", pm, ok, err)
+		}
+	}
+}
+
+// TestBusyTimeoutSet: the DSN sets a 5s busy timeout, so a concurrent
+// writer waits for the lock instead of failing with SQLITE_BUSY.
+func TestBusyTimeoutSet(t *testing.T) {
+	s := openTestStore(t)
+	var timeout int
+	if err := s.db.QueryRow("PRAGMA busy_timeout").Scan(&timeout); err != nil {
+		t.Fatalf("PRAGMA busy_timeout: %v", err)
+	}
+	if timeout != 5000 {
+		t.Errorf("busy_timeout = %d, want 5000", timeout)
+	}
+}
+
+// TestBusyTimeoutConcurrentWrites: two stores on one DB do concurrent
+// writes; the busy_timeout makes the second wait (not fail) for the
+// lock, and both succeed.
+func TestBusyTimeoutConcurrentWrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	s1, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open s1: %v", err)
+	}
+	defer s1.Close()
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open s2: %v", err)
+	}
+	defer s2.Close()
+
+	// s1 holds a write transaction (the write lock); s2's write waits
+	// (busy_timeout) instead of failing with SQLITE_BUSY.
+	release := make(chan struct{})
+	held := make(chan struct{})
+	go func() {
+		tx, err := s1.db.Begin()
+		if err != nil {
+			t.Errorf("s1 Begin: %v", err)
+			return
+		}
+		if _, err := tx.Exec(`INSERT INTO meta (key, value) VALUES ('k1', 'v1')`); err != nil {
+			t.Errorf("s1 write: %v", err)
+		}
+		close(held)
+		<-release
+		if err := tx.Commit(); err != nil {
+			t.Errorf("s1 Commit: %v", err)
+		}
+	}()
+	<-held
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := s2.db.Exec(`INSERT INTO meta (key, value) VALUES ('k2', 'v2')
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+		errCh <- err
+	}()
+	// Give s2's write a moment to block on the lock, then release s1.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	if err := <-errCh; err != nil {
+		t.Errorf("s2 concurrent write = %v, want nil (waited, not SQLITE_BUSY)", err)
+	}
+}
+
+// TestRateStatePreservesSubSecondPrecision: the last-refill instant is
+// persisted with nanosecond precision (the legacy unix-seconds shape
+// refunded up to ~1s of refill per process).
+func TestRateStatePreservesSubSecondPrecision(t *testing.T) {
+	s := openTestStore(t)
+	last := time.Unix(1_000_000, 123456789) // 123ms into the second
+	if err := s.SetRateState(testCtx, 1.5, last); err != nil {
+		t.Fatalf("SetRateState: %v", err)
+	}
+	_, gotLast, err := s.RateState(testCtx)
+	if err != nil {
+		t.Fatalf("RateState: %v", err)
+	}
+	if !gotLast.Equal(last) {
+		t.Errorf("last = %v, want %v (sub-second precision lost)", gotLast, last)
+	}
+}
+
+// TestRateStateLegacySeconds: a legacy unix-seconds last-refill instant
+// is read back correctly (the magnitude heuristic).
+func TestRateStateLegacySeconds(t *testing.T) {
+	s := openTestStore(t)
+	// Write a legacy unix-seconds value directly.
+	if err := s.SetMeta(testCtx, MetaRateTokens, "1"); err != nil {
+		t.Fatalf("SetMeta tokens: %v", err)
+	}
+	if err := s.SetMeta(testCtx, MetaRateLast, "1000000"); err != nil {
+		t.Fatalf("SetMeta last: %v", err)
+	}
+	_, gotLast, err := s.RateState(testCtx)
+	if err != nil {
+		t.Fatalf("RateState: %v", err)
+	}
+	want := time.Unix(1_000_000, 0)
+	if !gotLast.Equal(want) {
+		t.Errorf("last = %v, want %v (legacy seconds)", gotLast, want)
+	}
+}
+
+// TestWatchesForRoom: the room-filtered, unexpired watch list excludes
+// other rooms and already-expired watches.
+func TestWatchesForRoom(t *testing.T) {
+	s := openTestStore(t)
+	if _, err := s.AddWatch(testCtx, Watch{ID: "in-room", RoomID: "room1", Kind: watch.KindPattern, Pattern: "x"}, 3600, testNow); err != nil {
+		t.Fatalf("AddWatch in-room: %v", err)
+	}
+	if _, err := s.AddWatch(testCtx, Watch{ID: "other-room", RoomID: "room2", Kind: watch.KindPattern, Pattern: "y"}, 3600, testNow); err != nil {
+		t.Fatalf("AddWatch other-room: %v", err)
+	}
+	// An expired watch in room1: created 200s ago with a 100s ttl, so
+	// it expired 100s ago.
+	expiredCreated := testNow.Add(-200 * time.Second)
+	if _, err := s.AddWatch(testCtx, Watch{ID: "expired", RoomID: "room1", Kind: watch.KindPattern, Pattern: "z", CreatedAt: expiredCreated.Unix()}, 100, testNow); err != nil {
+		t.Fatalf("AddWatch expired: %v", err)
+	}
+
+	ws, err := s.WatchesForRoom(testCtx, "room1", testNow)
+	if err != nil {
+		t.Fatalf("WatchesForRoom: %v", err)
+	}
+	if len(ws) != 1 {
+		t.Fatalf("WatchesForRoom len = %d, want 1; got %+v", len(ws), ws)
+	}
+	if ws[0].ID != "in-room" {
+		t.Errorf("WatchesForRoom[0].ID = %q, want in-room (other-room and expired excluded)", ws[0].ID)
+	}
+}
+
+// TestSetCursorMaxUpsert: the cursor moves only forward; a lower id is
+// ignored, a higher id advances.
+func TestSetCursorMaxUpsert(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.SetCursor(testCtx, "room1", 10); err != nil {
+		t.Fatalf("SetCursor 10: %v", err)
+	}
+	if v, _ := s.GetCursor(testCtx, "room1"); v != 10 {
+		t.Fatalf("GetCursor = %d, want 10", v)
+	}
+	// A lower id is ignored (never moves backward).
+	if err := s.SetCursor(testCtx, "room1", 5); err != nil {
+		t.Fatalf("SetCursor 5: %v", err)
+	}
+	if v, _ := s.GetCursor(testCtx, "room1"); v != 10 {
+		t.Errorf("GetCursor after lower set = %d, want 10 (never moves backward)", v)
+	}
+	// A higher id advances.
+	if err := s.SetCursor(testCtx, "room1", 20); err != nil {
+		t.Fatalf("SetCursor 20: %v", err)
+	}
+	if v, _ := s.GetCursor(testCtx, "room1"); v != 20 {
+		t.Errorf("GetCursor after higher set = %d, want 20", v)
 	}
 }
