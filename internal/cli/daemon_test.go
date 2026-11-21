@@ -156,6 +156,54 @@ func TestResolveDaemonConfig(t *testing.T) {
 	})
 }
 
+// TestResolveDaemonConfigModeDeliverPrecedence pins the mode/deliver
+// precedence: a flag beats the config file, and env beats the config
+// file when no flag is set.
+func TestResolveDaemonConfigModeDeliverPrecedence(t *testing.T) {
+	env := func(k string) string {
+		switch k {
+		case "WHINNY_TOKEN":
+			return "tok"
+		case "WHINNY_URL":
+			return "ws://apron.test/ws"
+		default:
+			return ""
+		}
+	}
+
+	t.Run("flag beats the file for mode", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "daemon.json")
+		os.WriteFile(path, []byte(`{"mode": "shared", "exec_cmd": ["x"]}`), 0o644)
+		cfg, err := ResolveDaemonConfig(testInvocation(map[string]string{"config": path, "mode": "resident"}), env)
+		if err != nil {
+			t.Fatalf("ResolveDaemonConfig: %v", err)
+		}
+		if cfg.Mode != "resident" {
+			t.Errorf("mode = %q, want resident (flag wins)", cfg.Mode)
+		}
+	})
+
+	t.Run("env beats the file for deliver with no flag", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "daemon.json")
+		os.WriteFile(path, []byte(`{"deliver": "exec", "exec_cmd": ["old"]}`), 0o644)
+		e := func(k string) string {
+			if k == "WHINNY_DAEMON_DELIVER" {
+				return "feed"
+			}
+			return env(k)
+		}
+		cfg, err := ResolveDaemonConfig(testInvocation(map[string]string{"config": path}), e)
+		if err != nil {
+			t.Fatalf("ResolveDaemonConfig: %v", err)
+		}
+		if cfg.Deliver != "feed" {
+			t.Errorf("deliver = %q, want feed (env wins)", cfg.Deliver)
+		}
+	})
+}
+
 // isUsageErr reports whether err is a caller error: a parse failure or
 // a usage-class cli.Error.
 func isUsageErr(err error) bool {

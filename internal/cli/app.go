@@ -116,7 +116,6 @@ func App(d Deps) *clicontract.App {
 					{Name: "room", Kind: clicontract.String, Required: true, Usage: "target room id or title"},
 					{Name: "reply-to", Kind: clicontract.String, Usage: "message_id this post replies to"},
 					{Name: "thread-of", Kind: clicontract.String, Usage: "message_id to thread: create a thread and post the first reply anchored to it"},
-					{Name: "format", Kind: clicontract.String, Default: "markdown", Usage: "message format: markdown or plain"},
 					{Name: "json", Kind: clicontract.Bool, Usage: "print the result as JSON"},
 				},
 				Output: clicontract.Output{Mode: clicontract.OutputRaw, SuccessExitCodes: []int{0}},

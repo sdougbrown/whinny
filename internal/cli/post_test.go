@@ -123,15 +123,6 @@ func TestPostReplyToAndThreadOfExclusive(t *testing.T) {
 	}
 }
 
-func TestPostBadFormat(t *testing.T) {
-	c := &fakeClient{joined: []apronws.Room{{ID: "r1"}}}
-	_, err := PostHandler(testDeps(c))(context.Background(),
-		inv("post", []string{"hello"}, map[string]string{"room": "r1", "format": "html"}, nil), io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "markdown or plain") {
-		t.Fatalf("err = %v, want a format error", err)
-	}
-}
-
 func TestPostStdin(t *testing.T) {
 	c := &fakeClient{
 		joined: []apronws.Room{{ID: "r1"}},
@@ -226,6 +217,100 @@ func TestPostConsumesRateToken(t *testing.T) {
 	}
 	if !last.Equal(now) {
 		t.Errorf("last = %v, want the injected now", last)
+	}
+}
+
+// TestPostRefusesWhenRateExhausted: a pre-exhausted persisted bucket
+// (zero tokens, set through the store's rate-state helper) refuses the
+// post with the typed denial and a retry-after hint, and no send goes
+// out.
+func TestPostRefusesWhenRateExhausted(t *testing.T) {
+	c := &fakeClient{
+		joined: []apronws.Room{{ID: "r1", Title: "General"}},
+		postID: "msg-1",
+	}
+	d := postDeps(t, c)
+	d.Env = func(k string) string {
+		if k == "WHINNY_RATE_PER_MINUTE" {
+			return "5"
+		}
+		return ""
+	}
+	now := time.Unix(2_000_000, 0)
+	d.Now = func() time.Time { return now }
+	if err := d.Store.SetRateState(context.Background(), 0, now); err != nil {
+		t.Fatalf("SetRateState: %v", err)
+	}
+	_, err := PostHandler(d)(context.Background(),
+		inv("post", []string{"hello"}, map[string]string{"room": "r1"}, nil), io.Discard)
+	if err == nil {
+		t.Fatal("want a refusal, got nil")
+	}
+	if !strings.Contains(err.Error(), "refused-rate-limit") {
+		t.Fatalf("err = %v, want a refused-rate-limit denial", err)
+	}
+	if !strings.Contains(err.Error(), "retry is safe after") {
+		t.Fatalf("err = %v, want a retry-after hint", err)
+	}
+	if len(c.posts) != 0 {
+		t.Fatalf("posts = %d, want 0 (no send while rate-limited)", len(c.posts))
+	}
+}
+
+// TestPostSecondRefusedAtRateOne: with WHINNY_RATE_PER_MINUTE=1 the
+// first post consumes the bucket's only token (persisted by the bucket's
+// save hook) and the second is refused; only the first is sent.
+func TestPostSecondRefusedAtRateOne(t *testing.T) {
+	c := &fakeClient{
+		joined: []apronws.Room{{ID: "r1", Title: "General"}},
+		postID: "msg-1",
+	}
+	d := postDeps(t, c)
+	d.Env = func(k string) string {
+		if k == "WHINNY_RATE_PER_MINUTE" {
+			return "1"
+		}
+		return ""
+	}
+	now := time.Unix(2_000_000, 0)
+	d.Now = func() time.Time { return now }
+
+	if _, err := PostHandler(d)(context.Background(),
+		inv("post", []string{"first"}, map[string]string{"room": "r1"}, nil), io.Discard); err != nil {
+		t.Fatalf("first post: %v", err)
+	}
+	_, err := PostHandler(d)(context.Background(),
+		inv("post", []string{"second"}, map[string]string{"room": "r1"}, nil), io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "refused-rate-limit") {
+		t.Fatalf("second post err = %v, want a refused-rate-limit denial", err)
+	}
+	if len(c.posts) != 1 {
+		t.Fatalf("posts = %d, want 1 (only the first)", len(c.posts))
+	}
+}
+
+// TestPostInvalidRateEnv: a non-numeric WHINNY_RATE_PER_MINUTE is a
+// usage error naming the variable, before any guard or send.
+func TestPostInvalidRateEnv(t *testing.T) {
+	c := &fakeClient{joined: []apronws.Room{{ID: "r1"}}}
+	d := postDeps(t, c)
+	d.Env = func(k string) string {
+		if k == "WHINNY_RATE_PER_MINUTE" {
+			return "abc"
+		}
+		return ""
+	}
+	_, err := PostHandler(d)(context.Background(),
+		inv("post", []string{"hello"}, map[string]string{"room": "r1"}, nil), io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "WHINNY_RATE_PER_MINUTE") {
+		t.Fatalf("err = %v, want an error naming WHINNY_RATE_PER_MINUTE", err)
+	}
+	e, ok := err.(*Error)
+	if !ok || e.Class != ClassUsage {
+		t.Fatalf("err = %v, want a usage-class error", err)
+	}
+	if len(c.posts) != 0 {
+		t.Fatalf("posts = %d, want 0 (no send on a usage error)", len(c.posts))
 	}
 }
 

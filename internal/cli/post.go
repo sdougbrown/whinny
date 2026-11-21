@@ -45,13 +45,6 @@ func PostHandler(d Deps) clicontract.HandleFunc {
 		if replyTo != "" && threadOf != "" {
 			return nil, UsageErrorf("post: --reply-to and --thread-of are mutually exclusive")
 		}
-		format := inv.Flags["format"]
-		if format == "" {
-			format = "markdown"
-		}
-		if format != "markdown" && format != "plain" {
-			return nil, UsageErrorf("post: --format must be markdown or plain, got %q", format)
-		}
 		// Guard: evaluate the send-path guard chain before connecting.
 		// A denial is a non-zero exit carrying the typed denial text.
 		if err := d.guard(ctx); err != nil {
