@@ -6,6 +6,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sdougbrown/whinny/internal/apronws"
@@ -64,6 +65,12 @@ type daemon struct {
 	class  wake.Classifier
 	hist   *historyCache
 	wait   func(time.Duration)
+	// procMu serializes record handling between the live loop and the
+	// reconnect catch-up goroutine: the cursor dedupe is check-then-act
+	// (GetCursor then SetCursor, with no store-side lock spanning both),
+	// so an unlocked overlap lets one message evaluate twice. Held across
+	// the whole handleRecord body; Deliver must not re-enter handleRecord.
+	procMu sync.Mutex
 }
 
 // Run drives the daemon until ctx is done: it validates the config
@@ -248,6 +255,8 @@ func (d *daemon) catchUp(ctx context.Context) {
 // handleRecord processes one inbound push. Only message records carry
 // policy weight; room updates and activities are ignored.
 func (d *daemon) handleRecord(ctx context.Context, rec apronws.Record, subscribe bool) {
+	d.procMu.Lock()
+	defer d.procMu.Unlock()
 	if rec.Kind != apronws.KindMessage || rec.Message == nil {
 		return
 	}
