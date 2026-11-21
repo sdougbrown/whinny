@@ -85,6 +85,7 @@ func TestSendFailsBeforeAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fc2.wantToken = "tok-2" // the client re-auths with the rotated token
 
 	// A request before re-auth fails client-side and is never sent.
 	if _, err := c.Send(ctx, "history", nil); !errors.Is(err, ErrNotAuthenticated) {

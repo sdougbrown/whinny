@@ -47,6 +47,7 @@ func TestReconnect(t *testing.T) {
 			t.Error(err)
 			return
 		}
+		fc2.wantToken = "tok-2" // the client re-auths with the rotated token
 		if err := fc2.handshake(ctx, 30); err != nil {
 			t.Error(err)
 		}
@@ -82,7 +83,7 @@ func TestReconnect(t *testing.T) {
 
 func TestKeepalive(t *testing.T) {
 	f := newFakeServer(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
 	go func() {
@@ -91,7 +92,7 @@ func TestKeepalive(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		if err := fc.handshake(ctx, 1); err != nil { // server suggests a 1s interval
+		if err := fc.handshake(ctx, 1); err != nil { // server suggests a 1s interval, clamped to the 5s minimum
 			t.Error(err)
 		}
 	}()
@@ -111,7 +112,8 @@ func TestKeepalive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Cadence: the client pings on the server-suggested 1s interval.
+	// Cadence: the client pings on the server-suggested interval, clamped to
+	// the 5s minimum.
 	for i := 0; i < 2; i++ {
 		f, err := fc.recvFrame(ctx)
 		if err != nil {
@@ -130,6 +132,7 @@ func TestKeepalive(t *testing.T) {
 			t.Error(err)
 			return
 		}
+		fc2.wantToken = "tok-2" // the client re-auths with the rotated token
 		if err := fc2.handshake(ctx, 1); err != nil {
 			t.Error(err)
 		}

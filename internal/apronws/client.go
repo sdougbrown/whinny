@@ -39,13 +39,16 @@ type Client struct {
 	done   chan struct{}
 
 	// OnReconnect, if set, is called on each successful reconnect after
-	// the initial connect, before push delivery resumes. It runs in the
-	// client's background loop; keep it short and non-blocking.
+	// the initial connect. It runs in its own goroutine, off the client's
+	// read loop; keep it short and non-blocking.
 	OnReconnect func()
 
 	mu      sync.Mutex
 	live    *live
 	authed  bool
+	// token is the server-issued token from the last auth; it is preferred
+	// over opts.Token on (re)auth. Empty until the first auth succeeds.
+	token   string
 	server  ServerInfo
 	pending map[string]*pending
 	idSeq   uint64
@@ -334,6 +337,33 @@ func (p *pending) deliver(r reply) {
 	p.once.Do(func() { p.ch <- r })
 }
 
+// authToken returns the token to send with the next (re)auth: the
+// server-issued token when present, else the configured token.
+func (c *Client) authToken() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.token != "" {
+		return c.token
+	}
+	return c.opts.Token
+}
+
+// clampPingInterval clamps the server-suggested keepalive interval to the
+// 5s-10m band: below 5s clamps to 5s, above 10m clamps to 10m, and zero
+// (unset) uses the 30s default.
+func clampPingInterval(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 30 * time.Second
+	}
+	if d < 5*time.Second {
+		return 5 * time.Second
+	}
+	if d > 10*time.Minute {
+		return 10 * time.Minute
+	}
+	return d
+}
+
 // wsURL appends "/ws" when the URL has no path, per the apron convention.
 func wsURL(u string) string {
 	p, err := url.Parse(u)
@@ -345,19 +375,25 @@ func wsURL(u string) string {
 
 // handshake dials, waits for the server push, and completes the auth
 // request. The auth reply is the last frame it consumes; the read loop
-// starts after it returns.
+// starts after it returns. The pre-auth phase is bounded by an internal
+// deadline so a wedged server feeds the backoff loop instead of hanging.
 func (c *Client) handshake(ctx context.Context) error {
-	conn, _, err := websocket.Dial(ctx, c.url, nil)
+	hctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(hctx, c.url, nil)
 	if err != nil {
 		return err
 	}
+	// History replies and pushes can exceed coder/websocket's 32KB default
+	// per-message read limit; unlimit it.
+	conn.SetReadLimit(-1)
 	lv := &live{conn: conn, pong: make(chan struct{}, 1)}
 	c.mu.Lock()
 	c.live = lv
 	c.mu.Unlock()
 
 	for {
-		typ, data, err := conn.Read(ctx)
+		typ, data, err := conn.Read(hctx)
 		if err != nil {
 			c.abortConn()
 			return err
@@ -392,14 +428,14 @@ func (c *Client) handshake(ctx context.Context) error {
 	c.mu.Lock()
 	c.pending[id] = p
 	c.mu.Unlock()
-	params, _ := json.Marshal(authParams{Scheme: "token", Token: c.opts.Token})
-	if err := c.writeFrame(ctx, conn, wireFrame{ID: id, Method: "auth", Params: params}); err != nil {
+	params, _ := json.Marshal(authParams{Scheme: "token", Token: c.authToken()})
+	if err := c.writeFrame(hctx, conn, wireFrame{ID: id, Method: "auth", Params: params}); err != nil {
 		c.removePending(id)
 		c.abortConn()
 		return err
 	}
 	for {
-		typ, data, err := conn.Read(ctx)
+		typ, data, err := conn.Read(hctx)
 		if err != nil {
 			c.removePending(id)
 			c.abortConn()
@@ -422,6 +458,11 @@ func (c *Client) handshake(ctx context.Context) error {
 		}
 		c.removePending(id)
 		if f.Error != nil {
+			// The rotated token was rejected; fall back to opts.Token on the
+			// next (re)auth attempt.
+			c.mu.Lock()
+			c.token = ""
+			c.mu.Unlock()
 			c.abortConn()
 			return f.Error.clientError()
 		}
@@ -430,8 +471,13 @@ func (c *Client) handshake(ctx context.Context) error {
 			c.abortConn()
 			return err
 		}
+		// The auth result's token is a freshly-issued token; tokens renew on
+		// use (30-day validity), so prefer it over opts.Token on reconnect.
 		c.mu.Lock()
 		c.authed = true
+		if ar.Token != "" {
+			c.token = ar.Token
+		}
 		c.mu.Unlock()
 		lv.cancel = c.startKeepalive(conn, lv.pong, c.server.Ping)
 		return nil
@@ -464,7 +510,7 @@ func (c *Client) run() {
 		}
 		backoff = time.Second
 		if hook := c.onReconnect(); hook != nil {
-			hook()
+			go hook()
 		}
 	}
 }
@@ -539,9 +585,7 @@ func (c *Client) abortConn() {
 // interval (30s when unset) and kills the connection if a pong is missed.
 func (c *Client) startKeepalive(conn *websocket.Conn, pong chan struct{}, interval time.Duration) context.CancelFunc {
 	ctx, cancel := context.WithCancel(c.ctx)
-	if interval <= 0 {
-		interval = 30 * time.Second
-	}
+	interval = clampPingInterval(interval)
 	go func() {
 		defer cancel()
 		ticker := time.NewTicker(interval)
@@ -608,6 +652,7 @@ func (c *Client) failPending(err error) {
 func (c *Client) deliverReply(f wireFrame) {
 	c.mu.Lock()
 	p := c.pending[f.ID]
+	delete(c.pending, f.ID)
 	c.mu.Unlock()
 	if p == nil {
 		return

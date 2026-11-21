@@ -33,6 +33,10 @@ type fakeConn struct {
 	closeCh  chan struct{}
 	closed   chan struct{}
 	autoPong atomic.Bool
+	// wantToken is the token the handshake asserts the client sends; rotToken
+	// is the rotated token the auth reply returns.
+	wantToken string
+	rotToken  string
 }
 
 // fakeServer is a WebSocket server for tests. It accepts connections and
@@ -63,6 +67,8 @@ func newFakeServer(t *testing.T) *fakeServer {
 			closed:  make(chan struct{}),
 		}
 		fc.autoPong.Store(true)
+		fc.wantToken = "test-token"
+		fc.rotToken = "tok-2"
 		f.mu.Lock()
 		f.conns = append(f.conns, fc)
 		f.mu.Unlock()
@@ -81,7 +87,7 @@ func (f *fakeServer) wsURL() string {
 
 // waitConn waits for the n-th accepted connection (1-indexed).
 func (f *fakeServer) waitConn(n int) (*fakeConn, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	for {
 		f.mu.Lock()
@@ -211,14 +217,14 @@ func (fc *fakeConn) handshake(ctx context.Context, ping int) error {
 	if err := json.Unmarshal(f.Params, &ap); err != nil {
 		return err
 	}
-	if ap.Scheme != "token" || ap.Token != "test-token" {
-		return fmt.Errorf("auth params = %+v, want scheme=token token=test-token", ap)
+	if ap.Scheme != "token" || ap.Token != fc.wantToken {
+		return fmt.Errorf("auth params = %+v, want scheme=token token=%s", ap, fc.wantToken)
 	}
 	return fc.sendFrame(map[string]any{
 		"id": f.ID,
 		"result": map[string]any{
 			"you":   map[string]any{"user_id": "u1", "name": "Test"},
-			"token": "tok-2",
+			"token": fc.rotToken,
 		},
 	})
 }
