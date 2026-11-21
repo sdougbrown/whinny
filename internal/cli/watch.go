@@ -36,6 +36,9 @@ func AddWatchHandler(d Deps) clicontract.HandleFunc {
 		if inv.Bools["once"] && inv.Bools["persistent"] {
 			return nil, UsageErrorf("watch add: --once and --persistent are mutually exclusive")
 		}
+		if pattern != "" && thread != "" {
+			return nil, UsageErrorf("watch add: --pattern and --thread are mutually exclusive")
+		}
 		owner := inv.Flags["owner"]
 		onFire := inv.Flags["on-fire"]
 		if owner == "" && onFire != "" {

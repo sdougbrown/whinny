@@ -40,6 +40,7 @@ func TestWatchAddValidation(t *testing.T) {
 	}{
 		{"no condition", map[string]string{"room": "r1"}, nil, "at least one of"},
 		{"once and persistent", map[string]string{"room": "r1", "pattern": "x"}, map[string]bool{"once": true, "persistent": true}, "mutually exclusive"},
+		{"pattern and thread", map[string]string{"room": "r1", "pattern": "x", "thread": "m1"}, nil, "mutually exclusive"},
 		{"ttl over cap", map[string]string{"room": "r1", "pattern": "x"}, map[string]bool{}, "exceeds the"},
 		{"bad pattern", map[string]string{"room": "r1", "pattern": "("}, nil, "does not compile"},
 	}
