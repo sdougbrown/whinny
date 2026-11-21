@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/sdougbrown/whinny/internal/watch"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -60,7 +62,7 @@ const schema = `
 CREATE TABLE IF NOT EXISTS watches (
   id TEXT PRIMARY KEY,
   room_id TEXT NOT NULL,
-  owner TEXT NOT NULL DEFAULT 'resident',
+  owner TEXT NOT NULL DEFAULT '` + watch.DefaultOwner + `',
   kind TEXT NOT NULL,
   from_user TEXT,
   pattern TEXT,
@@ -105,7 +107,7 @@ func (s *Store) migrate(ctx context.Context) error {
 
 // ensureWatchOwner adds the owner column to the watches table when it is
 // missing (databases created before the column existed). The column is
-// TEXT NOT NULL DEFAULT 'resident'.
+// TEXT NOT NULL DEFAULT watch.DefaultOwner.
 func (s *Store) ensureWatchOwner(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(watches)`)
 	if err != nil {
@@ -130,6 +132,6 @@ func (s *Store) ensureWatchOwner(ctx context.Context) error {
 	if hasOwner {
 		return nil
 	}
-	_, err = s.db.ExecContext(ctx, `ALTER TABLE watches ADD COLUMN owner TEXT NOT NULL DEFAULT 'resident'`)
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE watches ADD COLUMN owner TEXT NOT NULL DEFAULT '`+watch.DefaultOwner+`'`)
 	return err
 }

@@ -400,11 +400,11 @@ func (d *daemon) ownerCommand(ctx context.Context, owner string) []string {
 }
 
 // ownsWatch reports whether this resident daemon should act on a watch
-// with owner: 'resident' (the default) and the daemon's own agent are
-// kept; anything else belongs to a shared-mode transient with its own
-// callback and must not be consumed here.
+// with owner: watch.DefaultOwner (the default) and the daemon's own
+// agent are kept; anything else belongs to a shared-mode transient with
+// its own callback and must not be consumed here.
 func (d *daemon) ownsWatch(owner string) bool {
-	return owner == "resident" || owner == d.cfg.Agent
+	return owner == watch.DefaultOwner || owner == d.cfg.Agent
 }
 
 // expireDue delivers expiry envelopes for every due watch and deletes

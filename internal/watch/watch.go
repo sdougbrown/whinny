@@ -7,6 +7,10 @@
 // default); persistent watches set it to false explicitly.
 package watch
 
+// DefaultOwner is the sentinel owner for a watch added without an
+// explicit owner: the resident daemon acts on it.
+const DefaultOwner = "resident"
+
 // Kind discriminates a watch's kind.
 type Kind string
 

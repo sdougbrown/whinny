@@ -80,7 +80,7 @@ func (s *Store) AddWatch(ctx context.Context, w Watch, ttl int, now time.Time) (
 		w.CreatedAt = now.Unix()
 	}
 	if w.Owner == "" {
-		w.Owner = "resident"
+		w.Owner = watch.DefaultOwner
 	}
 	w.ExpiresAt = w.CreatedAt + int64(ttl)
 	if cap := now.Unix() + MaxTTLSeconds; w.ExpiresAt > cap {
