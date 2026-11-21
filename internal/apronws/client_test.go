@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/sdougbrown/whinny/internal/apronws/apronfake"
 	"testing"
 	"time"
@@ -21,7 +22,7 @@ func TestConnectHandshake(t *testing.T) {
 			return
 		}
 		if err := fc.Handshake(ctx, 30); err != nil {
-			t.Error(err)
+			f.ReportError(err)
 		}
 	}()
 
@@ -61,7 +62,7 @@ func TestSendFailsBeforeAuth(t *testing.T) {
 			return
 		}
 		if err := fc.Handshake(ctx, 30); err != nil {
-			t.Error(err)
+			f.ReportError(err)
 		}
 	}()
 	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
@@ -97,20 +98,20 @@ func TestSendFailsBeforeAuth(t *testing.T) {
 	c.SetOnReconnect(func() { close(reconnected) })
 	go func() {
 		if err := fc2.Handshake(ctx, 30); err != nil {
-			t.Error(err)
+			f.ReportError(err)
 			return
 		}
-		f, err := fc2.RecvFrame(ctx)
+		frame, err := fc2.RecvFrame(ctx)
 		if err != nil {
-			t.Error(err)
+			f.ReportError(err)
 			return
 		}
-		if f.Method != "history" {
-			t.Errorf("first post-auth frame = %q, want history", f.Method)
+		if frame.Method != "history" {
+			f.ReportError(fmt.Errorf("first post-auth frame = %q, want history", frame.Method))
 			return
 		}
-		if err := fc2.SendFrame(map[string]any{"id": f.ID, "result": map[string]any{"ok": true}}); err != nil {
-			t.Error(err)
+		if err := fc2.SendFrame(map[string]any{"id": frame.ID, "result": map[string]any{"ok": true}}); err != nil {
+			f.ReportError(err)
 		}
 	}()
 	select {
@@ -137,21 +138,21 @@ func TestSendReplyAndError(t *testing.T) {
 	go func() {
 		fc, err := f.WaitConn(1)
 		if err != nil {
-			t.Error(err)
+			f.ReportError(err)
 			return
 		}
 		if err := fc.Handshake(ctx, 30); err != nil {
-			t.Error(err)
+			f.ReportError(err)
 			return
 		}
 
-		f, err := fc.RecvFrame(ctx)
+		fr, err := fc.RecvFrame(ctx)
 		if err != nil {
-			t.Error(err)
+			f.ReportError(err)
 			return
 		}
-		if f.Method != "message" {
-			t.Errorf("first request = %q, want message", f.Method)
+		if fr.Method != "message" {
+			f.ReportError(fmt.Errorf("first request = %q, want message", fr.Method))
 			return
 		}
 		var p struct {
@@ -160,30 +161,30 @@ func TestSendReplyAndError(t *testing.T) {
 				Text string `json:"text"`
 			} `json:"body"`
 		}
-		if err := json.Unmarshal(f.Params, &p); err != nil {
-			t.Error(err)
+		if err := json.Unmarshal(fr.Params, &p); err != nil {
+			f.ReportError(err)
 			return
 		}
 		if p.RoomID != "r1" || p.Body.Text != "hi" {
-			t.Errorf("params = %+v, want room r1 body hi", p)
+			f.ReportError(fmt.Errorf("params = %+v, want room r1 body hi", p))
 			return
 		}
-		if err := fc.SendFrame(map[string]any{"id": f.ID, "result": map[string]any{"message_id": "m1"}}); err != nil {
-			t.Error(err)
+		if err := fc.SendFrame(map[string]any{"id": fr.ID, "result": map[string]any{"message_id": "m1"}}); err != nil {
+			f.ReportError(err)
 			return
 		}
 
-		f, err = fc.RecvFrame(ctx)
+		fr, err = fc.RecvFrame(ctx)
 		if err != nil {
-			t.Error(err)
+			f.ReportError(err)
 			return
 		}
-		if f.Method != "history" {
-			t.Errorf("second request = %q, want history", f.Method)
+		if fr.Method != "history" {
+			f.ReportError(fmt.Errorf("second request = %q, want history", fr.Method))
 			return
 		}
 		err = fc.SendFrame(map[string]any{
-			"id": f.ID,
+			"id": fr.ID,
 			"error": map[string]any{
 				"code":    429,
 				"message": "slow down",
@@ -191,7 +192,7 @@ func TestSendReplyAndError(t *testing.T) {
 			},
 		})
 		if err != nil {
-			t.Error(err)
+			f.ReportError(err)
 		}
 	}()
 
@@ -240,7 +241,7 @@ func TestPushDelivery(t *testing.T) {
 			return
 		}
 		if err := fc.Handshake(ctx, 30); err != nil {
-			t.Error(err)
+			f.ReportError(err)
 		}
 	}()
 	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})

@@ -68,6 +68,15 @@ type Server struct {
 	conns   []*Conn
 	newConn chan struct{}
 
+	// errMu guards errs: errors recorded by server-side goroutines,
+	// drained at test teardown by CheckErrors (registered by New), so a
+	// late failure cannot log after the test has completed.
+	errMu sync.Mutex
+	errs  []error
+
+	// historyCalls counts every history request the server sees.
+	historyCalls atomic.Int64
+
 	// AutoRespond, when set, makes the server answer room_list and
 	// history requests itself (from JoinedRooms/HistoryByRoom); when
 	// unset, those frames are forwarded to the test, which drives the
@@ -112,7 +121,36 @@ func New(t *testing.T) *Server {
 	})
 	f.ts = httptest.NewServer(mux)
 	t.Cleanup(f.ts.Close)
+	t.Cleanup(func() { f.CheckErrors(t) })
 	return f
+}
+
+// ReportError records an error from a server-side goroutine. It is
+// drained at test teardown (CheckErrors), so a late failure cannot log
+// after the test has completed (a t.Error from a goroutine after the
+// test body exits panics and obscures the real failure).
+func (f *Server) ReportError(err error) {
+	f.errMu.Lock()
+	f.errs = append(f.errs, err)
+	f.errMu.Unlock()
+}
+
+// CheckErrors reports the errors recorded by server-side goroutines.
+func (f *Server) CheckErrors(t *testing.T) {
+	t.Helper()
+	f.errMu.Lock()
+	errs := f.errs
+	f.errs = nil
+	f.errMu.Unlock()
+	for _, err := range errs {
+		t.Error(err)
+	}
+}
+
+// HistoryCallCount reports how many history requests the server has
+// seen: the tests use it to prove a lookup did (or did not) happen.
+func (f *Server) HistoryCallCount() int64 {
+	return f.historyCalls.Load()
 }
 
 // WSURL is the client-facing base URL (no path: the client appends /ws).
@@ -185,6 +223,9 @@ func (f *Server) runConn(fc *Conn) {
 		if fr.Method == "ping" && fc.AutoPong.Load() {
 			pong, _ := json.Marshal(map[string]any{"method": "pong"})
 			fc.write(pong)
+		}
+		if fr.Method == "history" {
+			f.historyCalls.Add(1)
 		}
 		// skip suppresses the recv push for a failed history auto-reply.
 		skip := false

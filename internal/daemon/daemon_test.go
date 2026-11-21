@@ -192,7 +192,15 @@ func startHarnessWithDeliverer(t *testing.T, cfg Config, custom Deliverer) *harn
 		done:   make(chan error, 1),
 	}
 	errC := make(chan error, 1)
-	go func() { errC <- serverHandshake(t, h.srv.ConnAt(t, 1)) }()
+	go func() {
+		fc, err := h.srv.WaitConn(1)
+		if err != nil {
+			h.srv.ReportError(err)
+			errC <- err
+			return
+		}
+		errC <- serverHandshake(t, fc)
+	}()
 	client, err := apronws.Connect(context.Background(), apronws.Options{URL: h.srv.WSURL(), Token: "test-token"})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -738,7 +746,15 @@ func TestRestartDrainsQueuedWake(t *testing.T) {
 	// Start a second daemon run over the same store.
 	h2 := &harness{srv: h.srv, dlv: newFakeDeliverer(), clock: h.clock, ticker: newTestTicker(), st: h.st, done: make(chan error, 1)}
 	errC2 := make(chan error, 1)
-	go func() { errC2 <- serverHandshake(t, h2.srv.ConnAt(t, 2)) }()
+	go func() {
+		fc, err := h2.srv.WaitConn(2)
+		if err != nil {
+			h2.srv.ReportError(err)
+			errC2 <- err
+			return
+		}
+		errC2 <- serverHandshake(t, fc)
+	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	client, err := apronws.Connect(ctx, apronws.Options{URL: h.srv.WSURL(), Token: "test-token"})
@@ -830,7 +846,15 @@ func startHarnessWithSetup(t *testing.T, cfg Config, setup func(*harness)) *harn
 		done:   make(chan error, 1),
 	}
 	errC := make(chan error, 1)
-	go func() { errC <- serverHandshake(t, h.srv.ConnAt(t, 1)) }()
+	go func() {
+		fc, err := h.srv.WaitConn(1)
+		if err != nil {
+			h.srv.ReportError(err)
+			errC <- err
+			return
+		}
+		errC <- serverHandshake(t, fc)
+	}()
 	client, err := apronws.Connect(context.Background(), apronws.Options{URL: h.srv.WSURL(), Token: "test-token"})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -994,10 +1018,14 @@ func TestCatchUpOnReconnect(t *testing.T) {
 	}
 	// The replacement connection handshakes.
 	go func() {
-		fc2 := h.srv.ConnAt(t, 2)
+		fc2, err := h.srv.WaitConn(2)
+		if err != nil {
+			h.srv.ReportError(err)
+			return
+		}
 		fc2.WantToken = "tok-2" // the client re-auths with the rotated token
 		if err := serverHandshake(t, fc2); err != nil {
-			t.Error(err)
+			h.srv.ReportError(err)
 		}
 	}()
 

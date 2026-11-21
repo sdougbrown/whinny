@@ -3,6 +3,7 @@ package apronws
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/sdougbrown/whinny/internal/apronws/apronfake"
 	"testing"
 	"time"
@@ -19,11 +20,11 @@ func TestInFlightFailure(t *testing.T) {
 	go func() {
 		fc, err := f.WaitConn(1)
 		if err != nil {
-			t.Error(err)
+			f.ReportError(err)
 			return
 		}
 		if err := fc.Handshake(ctx, 30); err != nil {
-			t.Error(err)
+			f.ReportError(err)
 		}
 	}()
 	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
@@ -75,7 +76,7 @@ func TestInFlightFailure(t *testing.T) {
 	fc2.WantToken = "tok-2"
 	go func() {
 		if err := fc2.Handshake(ctx, 30); err != nil {
-			t.Error(err)
+			f.ReportError(err)
 		}
 	}()
 	select {
@@ -118,11 +119,11 @@ func TestRecordsClosedAfterClose(t *testing.T) {
 	go func() {
 		fc, err := f.WaitConn(1)
 		if err != nil {
-			t.Error(err)
+			f.ReportError(err)
 			return
 		}
 		if err := fc.Handshake(ctx, 30); err != nil {
-			t.Error(err)
+			f.ReportError(err)
 		}
 	}()
 	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
@@ -150,11 +151,11 @@ func TestBackpressure(t *testing.T) {
 	go func() {
 		fc, err := f.WaitConn(1)
 		if err != nil {
-			t.Error(err)
+			f.ReportError(err)
 			return
 		}
 		if err := fc.Handshake(ctx, 30); err != nil {
-			t.Error(err)
+			f.ReportError(err)
 		}
 	}()
 	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
@@ -250,11 +251,11 @@ func TestPendingMapHygiene(t *testing.T) {
 	go func() {
 		fc, err := f.WaitConn(1)
 		if err != nil {
-			t.Error(err)
+			f.ReportError(err)
 			return
 		}
 		if err := fc.Handshake(ctx, 30); err != nil {
-			t.Error(err)
+			f.ReportError(err)
 		}
 	}()
 	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
@@ -273,7 +274,7 @@ func TestPendingMapHygiene(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			if _, err := c.Send(ctx, "history", nil); err != nil {
-				t.Errorf("Send: %v", err)
+				f.ReportError(fmt.Errorf("Send: %v", err))
 			}
 			close(done)
 		}()
@@ -312,12 +313,12 @@ func TestRotatedToken(t *testing.T) {
 	go func() {
 		fc, err := f.WaitConn(1)
 		if err != nil {
-			t.Error(err)
+			f.ReportError(err)
 			return
 		}
 		// First auth uses opts.Token; the reply issues the rotated token.
 		if err := fc.Handshake(ctx, 30); err != nil {
-			t.Error(err)
+			f.ReportError(err)
 		}
 	}()
 	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
@@ -345,7 +346,7 @@ func TestRotatedToken(t *testing.T) {
 	authed := make(chan struct{})
 	go func() {
 		if err := fc2.Handshake(ctx, 30); err != nil {
-			t.Error(err)
+			f.ReportError(err)
 			return
 		}
 		close(authed)

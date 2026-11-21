@@ -15,11 +15,11 @@ func TestReconnect(t *testing.T) {
 	go func() {
 		fc, err := f.WaitConn(1)
 		if err != nil {
-			t.Error(err)
+			f.ReportError(err)
 			return
 		}
 		if err := fc.Handshake(ctx, 30); err != nil {
-			t.Error(err)
+			f.ReportError(err)
 		}
 	}()
 	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
@@ -43,12 +43,12 @@ func TestReconnect(t *testing.T) {
 	go func() {
 		fc2, err := f.WaitConn(2)
 		if err != nil {
-			t.Error(err)
+			f.ReportError(err)
 			return
 		}
 		fc2.WantToken = "tok-2" // the client re-auths with the rotated token
 		if err := fc2.Handshake(ctx, 30); err != nil {
-			t.Error(err)
+			f.ReportError(err)
 		}
 	}()
 	select {
@@ -93,11 +93,11 @@ func TestSetOnReconnectAfterConnect(t *testing.T) {
 	go func() {
 		fc, err := f.WaitConn(1)
 		if err != nil {
-			t.Error(err)
+			f.ReportError(err)
 			return
 		}
 		if err := fc.Handshake(ctx, 30); err != nil {
-			t.Error(err)
+			f.ReportError(err)
 		}
 	}()
 	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token", OnReconnect: func() { close(first) }})
@@ -118,12 +118,12 @@ func TestSetOnReconnectAfterConnect(t *testing.T) {
 	go func() {
 		fc2, err := f.WaitConn(2)
 		if err != nil {
-			t.Error(err)
+			f.ReportError(err)
 			return
 		}
 		fc2.WantToken = "tok-2" // the client re-auths with the rotated token
 		if err := fc2.Handshake(ctx, 30); err != nil {
-			t.Error(err)
+			f.ReportError(err)
 		}
 	}()
 	select {
@@ -147,12 +147,12 @@ func TestSetOnReconnectAfterConnect(t *testing.T) {
 	go func() {
 		fc3, err := f.WaitConn(3)
 		if err != nil {
-			t.Error(err)
+			f.ReportError(err)
 			return
 		}
 		fc3.WantToken = "tok-2" // the client re-auths with the rotated token
 		if err := fc3.Handshake(ctx, 30); err != nil {
-			t.Error(err)
+			f.ReportError(err)
 		}
 	}()
 	select {
@@ -170,11 +170,11 @@ func TestKeepalive(t *testing.T) {
 	go func() {
 		fc, err := f.WaitConn(1)
 		if err != nil {
-			t.Error(err)
+			f.ReportError(err)
 			return
 		}
 		if err := fc.Handshake(ctx, 1); err != nil { // server suggests a 1s interval, clamped to the 5s minimum
-			t.Error(err)
+			f.ReportError(err)
 		}
 	}()
 	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
@@ -208,12 +208,12 @@ func TestKeepalive(t *testing.T) {
 	go func() {
 		fc2, err := f.WaitConn(2)
 		if err != nil {
-			t.Error(err)
+			f.ReportError(err)
 			return
 		}
 		fc2.WantToken = "tok-2" // the client re-auths with the rotated token
 		if err := fc2.Handshake(ctx, 1); err != nil {
-			t.Error(err)
+			f.ReportError(err)
 		}
 	}()
 	select {
