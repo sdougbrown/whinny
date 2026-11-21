@@ -19,6 +19,30 @@ type Breaker struct {
 // that trip the send-path breaker.
 const MetaPostFailures = "post_failures"
 
+// execer is the write surface the shared breaker/meta helpers execute
+// against: the store's database or a transaction.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// setBreakerRow upserts the breaker row (id = 1).
+func setBreakerRow(e execer, ctx context.Context, latched int, latchedAt sql.NullInt64, reason string) error {
+	_, err := e.ExecContext(ctx,
+		`INSERT INTO breaker (id, latched, latched_at, reason) VALUES (1, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET latched = excluded.latched, latched_at = excluded.latched_at, reason = excluded.reason`,
+		latched, latchedAt, reason)
+	return err
+}
+
+// resetPostFailuresStmt sets the consecutive post-failure count to 0.
+func resetPostFailuresStmt(e execer, ctx context.Context) error {
+	_, err := e.ExecContext(ctx,
+		`INSERT INTO meta (key, value) VALUES (?, '0')
+		 ON CONFLICT(key) DO UPDATE SET value = '0'`,
+		MetaPostFailures)
+	return err
+}
+
 // SetBreaker upserts the breaker row (id = 1).
 func (s *Store) SetBreaker(ctx context.Context, b Breaker) error {
 	s.mu.Lock()
@@ -31,11 +55,7 @@ func (s *Store) SetBreaker(ctx context.Context, b Breaker) error {
 	if b.LatchedAt != 0 {
 		latchedAt = sql.NullInt64{Int64: b.LatchedAt, Valid: true}
 	}
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO breaker (id, latched, latched_at, reason) VALUES (1, ?, ?, ?)
-		 ON CONFLICT(id) DO UPDATE SET latched = excluded.latched, latched_at = excluded.latched_at, reason = excluded.reason`,
-		latched, latchedAt, b.Reason)
-	return err
+	return setBreakerRow(s.db, ctx, latched, latchedAt, b.Reason)
 }
 
 // GetBreaker returns the breaker state. A database that has never had the
@@ -89,11 +109,7 @@ func (s *Store) BumpPostFailures(ctx context.Context) (int, error) {
 func (s *Store) ResetPostFailures(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO meta (key, value) VALUES (?, '0')
-		 ON CONFLICT(key) DO UPDATE SET value = '0'`,
-		MetaPostFailures)
-	return err
+	return resetPostFailuresStmt(s.db, ctx)
 }
 
 // ClearBreaker releases the breaker latch and resets the consecutive
@@ -109,15 +125,10 @@ func (s *Store) ClearBreaker(ctx context.Context) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO breaker (id, latched, latched_at, reason) VALUES (1, 0, NULL, '')
-		 ON CONFLICT(id) DO UPDATE SET latched = 0, latched_at = NULL, reason = ''`); err != nil {
+	if err := setBreakerRow(tx, ctx, 0, sql.NullInt64{}, ""); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO meta (key, value) VALUES (?, '0')
-		 ON CONFLICT(key) DO UPDATE SET value = '0'`,
-		MetaPostFailures); err != nil {
+	if err := resetPostFailuresStmt(tx, ctx); err != nil {
 		return err
 	}
 	return tx.Commit()
