@@ -4,6 +4,7 @@ import (
 	"context"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sdougbrown/whinny/internal/watch"
@@ -227,8 +228,8 @@ func containsWord(text, word string) bool {
 	if word == "" {
 		return false
 	}
-	re, err := regexp.Compile(`(?i)\b` + regexp.QuoteMeta(word) + `\b`)
-	if err != nil {
+	re, ok := compiledWord(word)
+	if !ok {
 		return false
 	}
 	return re.MatchString(text)
@@ -288,14 +289,67 @@ func watchMatches(w watch.Watch, msg Msg) bool {
 	}
 }
 
-// patternMatches compiles the pattern (case-insensitive) and tests it
-// against text. An uncompileable pattern is a non-match, not a panic.
+// patternCache and wordCache memoize compiled regexps so the daemon's
+// hot path (one evaluation per watch per inbound message) compiles each
+// distinct pattern or word once, not per evaluation. A failed compile is
+// cached as reCompileFail so a bad pattern is compiled at most once.
+// Growth is bounded by the distinct vocabulary seen: deleted watches
+// leave small entries behind, which is accepted (one *regexp.Regexp per
+// distinct string, and the daemon's vocabulary is small).
+var (
+	patternCache sync.Map // "(?i)" + pattern -> *regexp.Regexp | reCompileFail
+	wordCache    sync.Map // word -> *regexp.Regexp | reCompileFail
+)
+
+// reCompileFail marks a pattern that failed to compile; a cached
+// failure is a non-match, not a panic.
+var reCompileFail = struct{}{}
+
+// compiledPattern returns the memoized compile of "(?i)" + pattern.
+// ok is false when the pattern does not compile.
+func compiledPattern(pattern string) (re *regexp.Regexp, ok bool) {
+	key := `(?i)` + pattern
+	if v, hit := patternCache.Load(key); hit {
+		if re, ok := v.(*regexp.Regexp); ok {
+			return re, true
+		}
+		return nil, false
+	}
+	re, err := regexp.Compile(key)
+	if err != nil {
+		patternCache.Store(key, reCompileFail)
+		return nil, false
+	}
+	patternCache.Store(key, re)
+	return re, true
+}
+
+// compiledWord returns the memoized compile of the word-boundary
+// pattern for word. ok is false when the pattern does not compile.
+func compiledWord(word string) (re *regexp.Regexp, ok bool) {
+	if v, hit := wordCache.Load(word); hit {
+		if re, ok := v.(*regexp.Regexp); ok {
+			return re, true
+		}
+		return nil, false
+	}
+	re, err := regexp.Compile(`(?i)\b` + regexp.QuoteMeta(word) + `\b`)
+	if err != nil {
+		wordCache.Store(word, reCompileFail)
+		return nil, false
+	}
+	wordCache.Store(word, re)
+	return re, true
+}
+
+// patternMatches tests the pattern (case-insensitive, memoized) against
+// text. An uncompileable pattern is a non-match, not a panic.
 func patternMatches(pattern, text string) bool {
 	if pattern == "" {
 		return false
 	}
-	re, err := regexp.Compile(`(?i)` + pattern)
-	if err != nil {
+	re, ok := compiledPattern(pattern)
+	if !ok {
 		return false
 	}
 	return re.MatchString(text)

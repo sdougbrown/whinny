@@ -625,3 +625,55 @@ func TestAmbientGateReleaseRestores(t *testing.T) {
 		t.Fatal("TryReserve after Release = false, want true (state restored)")
 	}
 }
+
+// TestPatternMemoReuses: repeated evaluations of the same pattern and
+// word return consistent results — the memoized compile is
+// transparent: the first evaluation and every later one agree, on
+// matches, non-matches, and the cached-failure path.
+func TestPatternMemoReuses(t *testing.T) {
+	// A pattern watch evaluated against the same message many times:
+	// every evaluation must agree with the first.
+	in := In{
+		Self:    testSelf(),
+		Peers:   Peers{},
+		Watches: []watch.Watch{{ID: "w1", RoomID: "room1", Kind: watch.KindPattern, Pattern: "deploy", Once: &trueBool}},
+		Msg:     Msg{RoomID: "room1", From: humanFrom(), Text: "the deploy is out"},
+	}
+	first := Evaluate(context.Background(), in)
+	if !first.Wake || first.Kind != KindWatch {
+		t.Fatalf("first evaluation = %+v, want a watch wake", first)
+	}
+	for i := 0; i < 100; i++ {
+		if d := Evaluate(context.Background(), in); d.Wake != first.Wake || d.Kind != first.Kind {
+			t.Fatalf("evaluation %d = %+v, want %+v (memo must not change results)", i, d, first)
+		}
+	}
+	// A non-matching text stays non-matching across evaluations.
+	in.Msg.Text = "nothing to see"
+	for i := 0; i < 100; i++ {
+		if d := Evaluate(context.Background(), in); d.Wake {
+			t.Fatalf("evaluation %d woke on a non-matching text: %+v", i, d)
+		}
+	}
+	// An uncompileable pattern is a non-match on every evaluation (the
+	// cached-failure path).
+	in.Watches = []watch.Watch{{ID: "w2", RoomID: "room1", Kind: watch.KindPattern, Pattern: `(?i)(unclosed`, Once: &trueBool}}
+	in.Msg.Text = "whatever"
+	for i := 0; i < 100; i++ {
+		if d := Evaluate(context.Background(), in); d.Wake {
+			t.Fatalf("evaluation %d woke on an uncompileable pattern: %+v", i, d)
+		}
+	}
+	// Repeated mention evaluations (the containsWord memo) agree.
+	in.Watches = nil
+	in.Msg = Msg{RoomID: "room1", From: humanFrom(), Text: "hey squire, hi"}
+	first = Evaluate(context.Background(), in)
+	if !first.Wake || first.Kind != KindMention {
+		t.Fatalf("mention evaluation = %+v, want a mention wake", first)
+	}
+	for i := 0; i < 100; i++ {
+		if d := Evaluate(context.Background(), in); d.Wake != first.Wake || d.Reason != first.Reason {
+			t.Fatalf("mention evaluation %d = %+v, want %+v", i, d, first)
+		}
+	}
+}

@@ -4,6 +4,14 @@
 // interfaces (HistoryLookup, Classifier) and an injected Clock. The daemon
 // owns the AmbientGate state and the watch list; this package only decides.
 //
+// Pattern and mention matching memoizes compiled regexps (one per
+// distinct pattern string, one per distinct word), so repeated
+// evaluations — the daemon evaluates every watch on every inbound
+// message — compile each pattern once. The caches grow with the
+// distinct vocabulary seen; deleted watches leave small entries behind,
+// which is accepted (one compiled regexp per distinct string, and the
+// vocabulary is small).
+//
 // The decision is an aggregation over an ordered evaluation:
 //
 //  1. Mention — the bot's name (or an alias) appears on a word boundary,
