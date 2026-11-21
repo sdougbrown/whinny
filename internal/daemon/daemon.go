@@ -352,14 +352,23 @@ func (d *daemon) flushQueue(ctx context.Context) {
 
 // handleShared routes watch hits to their owners. No mention/reply/ambient
 // evaluation, no durable queue: a delivery failure is logged and dropped,
-// because the transient run the wake belonged to may be gone.
+// because the transient run the wake belonged to may be gone. Only watches
+// whose owner has a delivery callback are evaluated: a resident-owned watch
+// has no callback and must not be fired (or its once-watch consumed) by a
+// shared daemon.
 func (d *daemon) handleShared(ctx context.Context, m *apronws.Message) {
 	msg := mapMsg(m)
+	var watches []store.Watch
+	for _, w := range d.roomWatches(ctx, m.RoomID) {
+		if d.hasDeliveryCallback(ctx, w.Owner) {
+			watches = append(watches, w)
+		}
+	}
 	dec := wake.Evaluate(ctx, wake.In{
 		Msg:     msg,
 		Self:    d.cfg.Self,
 		Peers:   d.cfg.Peers,
-		Watches: d.roomWatches(ctx, m.RoomID),
+		Watches: watches,
 		Clock:   d.clock,
 	})
 	// Mention/reply/ambient decisions carry no watch hits here; only
@@ -399,6 +408,13 @@ func (d *daemon) ownerCommand(ctx context.Context, owner string) []string {
 	return SplitCommand(v)
 }
 
+// hasDeliveryCallback reports whether the owner has a stored delivery
+// callback: the shared-mode owner rule for both the message path and the
+// expiry sweep.
+func (d *daemon) hasDeliveryCallback(ctx context.Context, owner string) bool {
+	return len(d.ownerCommand(ctx, owner)) > 0
+}
+
 // ownsWatch reports whether this resident daemon should act on a watch
 // with owner: watch.DefaultOwner (the default) and the daemon's own
 // agent are kept; anything else belongs to a shared-mode transient with
@@ -410,7 +426,9 @@ func (d *daemon) ownsWatch(owner string) bool {
 // expireDue delivers expiry envelopes for every due watch and deletes
 // the watch: expiry is a wake the agent must see to re-arm. In resident
 // mode the envelope routes through the durable queue under cfg.Agent
-// (matching the message path); foreign-owner watches are skipped.
+// (matching the message path) and foreign-owner watches are skipped; in
+// shared mode owners without a delivery callback are skipped (the same
+// rule as the message path).
 func (d *daemon) expireDue(ctx context.Context) {
 	due, err := d.store.DueWatches(ctx, d.now())
 	if err != nil {
@@ -419,6 +437,9 @@ func (d *daemon) expireDue(ctx context.Context) {
 	}
 	for _, w := range due {
 		if d.cfg.Mode == ModeResident && !d.ownsWatch(w.Owner) {
+			continue
+		}
+		if d.cfg.Mode == ModeShared && !d.hasDeliveryCallback(ctx, w.Owner) {
 			continue
 		}
 		env := ExpiryEnvelope(w)

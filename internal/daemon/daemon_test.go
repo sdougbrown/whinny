@@ -693,24 +693,99 @@ func TestSharedModeRoutesWatchToOwnerCallback(t *testing.T) {
 	h.stop(t)
 }
 
-func TestSharedModeOwnerWithoutCallbackUsesDeliverer(t *testing.T) {
+func TestSharedModeSkipsOwnerWithoutCallback(t *testing.T) {
 	cfg := baseCfg()
 	cfg.Mode = ModeShared
 	h := startHarness(t, cfg)
+	bTrue := true
 	if _, err := h.st.AddWatch(context.Background(), store.Watch{
 		RoomID: "r1", Owner: "bob", Kind: "pattern",
-		Pattern: "release", Note: "release shipped",
+		Pattern: "release", Note: "release shipped", Once: &bTrue,
 	}, 3600, h.clock.Now()); err != nil {
 		t.Fatalf("add watch: %v", err)
 	}
 
 	h.fc.pushMessage("m1", "r1", "doug", "the release is out", nil)
-	d := h.dlv.wait(t)
-	if d.agent != "bob" {
-		t.Errorf("agent = %q, want bob", d.agent)
+	waitSettled(t, h, 0, "owner without a callback must not fire in shared mode")
+	// The once-watch is not consumed.
+	ws, _ := h.st.ListWatches(context.Background())
+	if len(ws) != 1 || ws[0].Owner != "bob" {
+		t.Errorf("watches = %+v, want the watch still present (not consumed)", ws)
 	}
-	if !strings.Contains(d.env.Text, `note="release shipped"`) {
-		t.Errorf("envelope = %q", d.env.Text)
+	h.stop(t)
+}
+
+func TestSharedExpiryDeliversToCallback(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Mode = ModeShared
+	cfg.Agent = "relay"
+
+	sink := filepath.Join(t.TempDir(), "alice.out")
+	script := filepath.Join(t.TempDir(), "callback.sh")
+	writeScript(t, script, "#!/bin/sh\ncat >> "+sink+"\n")
+
+	h := startHarness(t, cfg)
+	if err := h.st.SetMeta(context.Background(), MetaDeliveryPrefix+"alice", script); err != nil {
+		t.Fatalf("set meta: %v", err)
+	}
+	bFalse := false
+	if _, err := h.st.AddWatch(context.Background(), store.Watch{
+		RoomID: "r1", Owner: "alice", Kind: "pattern",
+		Pattern: "deploy", Note: "waiting for deploy", Once: &bFalse,
+	}, 1, h.clock.Now()); err != nil {
+		t.Fatalf("add watch: %v", err)
+	}
+
+	h.clock.Advance(2 * time.Minute)
+	h.ticker.fire()
+
+	deadline := time.Now().Add(10 * time.Second)
+	var got []byte
+	for {
+		b, err := os.ReadFile(sink)
+		if err == nil && len(b) > 0 {
+			got = b
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("callback never wrote; sink err = %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(string(got), "kind=watch-expired") || !strings.Contains(string(got), `note="waiting for deploy"`) {
+		t.Errorf("callback got %q, want an expiry envelope with the note", got)
+	}
+	waitNoWatches(t, h)
+	h.stop(t)
+}
+
+func TestSharedExpirySkipsOwnerWithoutCallback(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Mode = ModeShared
+	h := startHarness(t, cfg)
+	bFalse := false
+	if _, err := h.st.AddWatch(context.Background(), store.Watch{
+		RoomID: "r1", Owner: "bob", Kind: "pattern",
+		Pattern: "release", Note: "waiting", Once: &bFalse,
+	}, 1, h.clock.Now()); err != nil {
+		t.Fatalf("add watch: %v", err)
+	}
+
+	h.clock.Advance(2 * time.Minute)
+	h.ticker.fire()
+
+	// Bounded window for the sweep to (not) act: if the watch is still
+	// present and undelivered at the end, the skip held.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ws, _ := h.st.ListWatches(context.Background())
+		if len(ws) == 0 {
+			t.Fatal("watch deleted; the shared daemon must skip owners without a callback")
+		}
+		if h.dlv.count() > 0 {
+			t.Fatal("delivery happened; the shared daemon must skip owners without a callback")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	h.stop(t)
 }
