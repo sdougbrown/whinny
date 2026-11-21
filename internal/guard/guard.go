@@ -77,10 +77,14 @@ func (c *Chain) Evaluate(in GuardInput) (Denial, bool) {
 	if d, denied := checkBreaker(in); denied {
 		return d, true
 	}
-	if d, denied := checkRateLimit(c, in); denied {
+	if d, denied := checkQuiet(in); denied {
 		return d, true
 	}
-	if d, denied := checkQuiet(in); denied {
+	// Rate limit comes last because a store-backed bucket consumes its
+	// token inside the check (one atomic transaction); checking quiet
+	// first keeps a quiet denial from consuming a token. When the bucket
+	// is empty AND the room is quiet, the caller sees refused-quiet.
+	if d, denied := checkRateLimit(c, in); denied {
 		return d, true
 	}
 	b := c.bucket
@@ -144,17 +148,13 @@ type RateBucket struct {
 	// bucket's current state; the hook's error is dropped (the in-memory
 	// state stays authoritative for the process).
 	onTake func(tokens float64, last time.Time) error
-	// takeFn, when set, makes CanServe perform the (refill, take,
-	// persist) as one atomic operation and Take a no-op. This is the
-	// store-backed path (NewStoreBucket): the check and the consume are
-	// one transaction, so a denial never leaves the bucket drained and a
-	// take is never lost to a concurrent caller. A persistence error
-	// denies (fail closed) with a 1s retry-after.
-	//
-	// Because the take happens in CanServe (before the quiet check), a
-	// quiet denial on a store-backed bucket consumes a token. That is the
-	// cost of atomicity: the take must be one transaction, and the chain's
-	// check-then-consume split cannot host it without a race.
+	// takeFn, when set, makes the take perform the (refill, take,
+	// persist) as one atomic operation. This is the store-backed path
+	// (NewStoreBucket): the check and the consume are one transaction, so
+	// a denial never leaves the bucket drained and a take is never lost
+	// to a concurrent caller. A persistence error denies (fail closed)
+	// with a 1s retry-after. The chain checks breaker and quiet BEFORE
+	// the take, so a quiet denial never consumes a token.
 	takeFn func(now time.Time) (ok bool, retryAfter time.Duration, err error)
 }
 

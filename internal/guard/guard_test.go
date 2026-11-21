@@ -183,14 +183,15 @@ func TestOrdering(t *testing.T) {
 	noBreaker := all
 	noBreaker.BreakerLatched = false
 	d, denied = chain.Evaluate(noBreaker)
-	if !denied || d.Kind != KindRefusedRateLimit {
-		t.Fatalf("breaker clear: (%+v, %v), want refused-rate-limit", d, denied)
+	if !denied || d.Kind != KindRefusedQuiet {
+		t.Fatalf("breaker clear: (%+v, %v), want refused-quiet (quiet is checked before the rate take)", d, denied)
 	}
 
-	noBreaker.Bucket = NewRateBucket(Config{PerMinute: 2})
+	// Clear quiet: an empty bucket now denies with refused-rate-limit.
+	noBreaker.QuietUntil = 0
 	d, denied = chain.Evaluate(noBreaker)
-	if !denied || d.Kind != KindRefusedQuiet {
-		t.Fatalf("bucket fresh: (%+v, %v), want refused-quiet", d, denied)
+	if !denied || d.Kind != KindRefusedRateLimit {
+		t.Fatalf("quiet clear: (%+v, %v), want refused-rate-limit", d, denied)
 	}
 }
 

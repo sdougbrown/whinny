@@ -6,7 +6,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/sdougbrown/cli-contract"
 	"github.com/sdougbrown/whinny/internal/apronws"
@@ -132,11 +131,7 @@ func (d Deps) guard(ctx context.Context) error {
 		}
 		perMinute = n
 	}
-	bucket := guard.NewPersistedBucket(
-		func() (float64, time.Time, error) { return st.RateState(ctx) },
-		func(tokens float64, last time.Time) error { return st.SetRateState(ctx, tokens, last) },
-		perMinute,
-	)
+	bucket := guard.NewStoreBucket(st, perMinute)
 	quietStr, err := st.GetMeta(ctx, MetaQuietUntil)
 	if err != nil {
 		return OperationalErrorf("quiet: %v", err)
