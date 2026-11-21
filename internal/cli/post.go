@@ -49,11 +49,11 @@ func PostHandler(d Deps) clicontract.HandleFunc {
 		// A denial is a non-zero exit carrying the typed denial text.
 		// The store stays open for the whole handler so a failed send
 		// can refund the consumed rate token.
-		st, err := d.store()
+		st, owned, err := d.storeOwned()
 		if err != nil {
 			return nil, err
 		}
-		if d.Store == nil {
+		if owned {
 			defer st.Close()
 		}
 		bucket, err := d.guard(ctx, st)

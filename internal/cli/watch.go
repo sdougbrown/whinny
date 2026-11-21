@@ -84,11 +84,11 @@ func AddWatchHandler(d Deps) clicontract.HandleFunc {
 		if err != nil {
 			return nil, err
 		}
-		st, err := d.store()
+		st, owned, err := d.storeOwned()
 		if err != nil {
 			return nil, err
 		}
-		if d.Store == nil {
+		if owned {
 			defer st.Close()
 		}
 		w := buildWatch(room.ID, from, pattern, thread, replyTo, inv.Flags["note"], inv.Bools["persistent"])
@@ -150,11 +150,11 @@ func CancelWatchHandler(d Deps) clicontract.HandleFunc {
 			return nil, UsageErrorf("watch cancel: missing watch id")
 		}
 		id := inv.Args[0]
-		st, err := d.store()
+		st, owned, err := d.storeOwned()
 		if err != nil {
 			return nil, err
 		}
-		if d.Store == nil {
+		if owned {
 			defer st.Close()
 		}
 		removed := false
@@ -192,11 +192,11 @@ type watchJSON struct {
 // --json.
 func ListWatchesHandler(d Deps) clicontract.HandleFunc {
 	return func(ctx context.Context, inv clicontract.Invocation, _ io.Writer) (any, error) {
-		st, err := d.store()
+		st, owned, err := d.storeOwned()
 		if err != nil {
 			return nil, err
 		}
-		if d.Store == nil {
+		if owned {
 			defer st.Close()
 		}
 		ws, err := st.ListWatches(ctx)

@@ -80,15 +80,20 @@ func (d Deps) connect(ctx context.Context, inv clicontract.Invocation) (RoomClie
 	return c, true, nil
 }
 
-// store returns the state store the handler uses.
-func (d Deps) store() (*store.Store, error) {
+// storeOwned returns the state store the handler uses and whether the
+// handler owns it (and must Close it).
+func (d Deps) storeOwned() (*store.Store, bool, error) {
 	if d.Store != nil {
-		return d.Store, nil
+		return d.Store, false, nil
 	}
 	if d.OpenStore == nil {
-		return nil, OperationalErrorf("no state store configured")
+		return nil, false, OperationalErrorf("no state store configured")
 	}
-	return d.OpenStore()
+	st, err := d.OpenStore()
+	if err != nil {
+		return nil, false, err
+	}
+	return st, true, nil
 }
 
 // App builds the declared whinny CLI.

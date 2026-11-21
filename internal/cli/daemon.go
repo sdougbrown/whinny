@@ -66,17 +66,7 @@ func DaemonHandler(d Deps) clicontract.RawFunc {
 // daemonStore opens the state store the daemon uses, reporting whether
 // the caller owns it (and must close it).
 func (d Deps) daemonStore() (*store.Store, bool, error) {
-	if d.Store != nil {
-		return d.Store, false, nil
-	}
-	if d.OpenStore == nil {
-		return nil, false, OperationalErrorf("no state store configured")
-	}
-	st, err := d.OpenStore()
-	if err != nil {
-		return nil, false, err
-	}
-	return st, true, nil
+	return d.storeOwned()
 }
 
 // daemonFileConfig is the daemon config file's JSON shape: the

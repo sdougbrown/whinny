@@ -27,11 +27,11 @@ const DefaultQuietDuration = 8 * time.Hour
 // flowing; quiet only gates sends.
 func QuietHandler(d Deps) clicontract.HandleFunc {
 	return func(ctx context.Context, inv clicontract.Invocation, _ io.Writer) (any, error) {
-		st, err := d.store()
+		st, owned, err := d.storeOwned()
 		if err != nil {
 			return nil, err
 		}
-		if d.Store == nil {
+		if owned {
 			defer st.Close()
 		}
 		forDur := DefaultQuietDuration
@@ -63,11 +63,11 @@ func QuietHandler(d Deps) clicontract.HandleFunc {
 // ResumeHandler runs `whinny resume`: it clears the quiet gate.
 func ResumeHandler(d Deps) clicontract.HandleFunc {
 	return func(ctx context.Context, inv clicontract.Invocation, _ io.Writer) (any, error) {
-		st, err := d.store()
+		st, owned, err := d.storeOwned()
 		if err != nil {
 			return nil, err
 		}
-		if d.Store == nil {
+		if owned {
 			defer st.Close()
 		}
 		if err := st.SetMeta(ctx, MetaQuietUntil, ""); err != nil {
