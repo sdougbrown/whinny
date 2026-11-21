@@ -69,7 +69,7 @@ func TestResolveDaemonConfig(t *testing.T) {
 	t.Run("flags override the file", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "daemon.json")
-		os.WriteFile(path, []byte(`{"mode": "shared", "deliver": "exec", "exec_cmd": ["old"]}`), 0o644)
+		os.WriteFile(path, []byte(`{"mode": "shared", "deliver": "exec", "exec_cmd": ["old"], "self": {"user_id": "u9"}}`), 0o644)
 		inv := testInvocation(map[string]string{
 			"config": path, "mode": "resident", "deliver": "exec",
 			"exec-cmd": `opencode run --flag "two words"`, "socket-url": "http://x",
@@ -89,7 +89,7 @@ func TestResolveDaemonConfig(t *testing.T) {
 	t.Run("env overrides the file for mode and deliver", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "daemon.json")
-		os.WriteFile(path, []byte(`{"mode": "resident"}`), 0o644)
+		os.WriteFile(path, []byte(`{"mode": "resident", "self": {"user_id": "u9"}}`), 0o644)
 		e := func(k string) string {
 			if k == "WHINNY_DAEMON_MODE" {
 				return "shared"
@@ -114,8 +114,11 @@ func TestResolveDaemonConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("defaults when the file is absent", func(t *testing.T) {
-		cfg, err := ResolveDaemonConfig(testInvocation(map[string]string{"exec-cmd": "run-wake"}), env)
+	t.Run("defaults when the file sets only self", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "daemon.json")
+		os.WriteFile(path, []byte(`{"self": {"user_id": "u9"}}`), 0o644)
+		cfg, err := ResolveDaemonConfig(testInvocation(map[string]string{"config": path, "exec-cmd": "run-wake"}), env)
 		if err != nil {
 			t.Fatalf("ResolveDaemonConfig: %v", err)
 		}
@@ -174,7 +177,7 @@ func TestResolveDaemonConfigModeDeliverPrecedence(t *testing.T) {
 	t.Run("flag beats the file for mode", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "daemon.json")
-		os.WriteFile(path, []byte(`{"mode": "shared", "exec_cmd": ["x"]}`), 0o644)
+		os.WriteFile(path, []byte(`{"mode": "shared", "exec_cmd": ["x"], "self": {"user_id": "u9"}}`), 0o644)
 		cfg, err := ResolveDaemonConfig(testInvocation(map[string]string{"config": path, "mode": "resident"}), env)
 		if err != nil {
 			t.Fatalf("ResolveDaemonConfig: %v", err)
@@ -187,7 +190,7 @@ func TestResolveDaemonConfigModeDeliverPrecedence(t *testing.T) {
 	t.Run("env beats the file for deliver with no flag", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "daemon.json")
-		os.WriteFile(path, []byte(`{"deliver": "exec", "exec_cmd": ["old"]}`), 0o644)
+		os.WriteFile(path, []byte(`{"deliver": "exec", "exec_cmd": ["old"], "self": {"user_id": "u9"}}`), 0o644)
 		e := func(k string) string {
 			if k == "WHINNY_DAEMON_DELIVER" {
 				return "feed"
@@ -253,6 +256,9 @@ func TestDaemonHandlerWiring(t *testing.T) {
 	}
 	defer st.Close()
 
+	cfgPath := filepath.Join(dir, "daemon.json")
+	os.WriteFile(cfgPath, []byte(`{"self": {"user_id": "u9"}}`), 0o644)
+
 	var gotCfg daemon.Config
 	var gotDeps daemon.Deps
 	ran := false
@@ -272,7 +278,7 @@ func TestDaemonHandlerWiring(t *testing.T) {
 	}
 	handler := DaemonHandler(d)
 	var out bytes.Buffer
-	inv := testInvocation(map[string]string{"mode": "shared", "deliver": "feed"})
+	inv := testInvocation(map[string]string{"config": cfgPath, "mode": "shared", "deliver": "feed"})
 	if err := handler(context.Background(), inv, &out); err != nil {
 		t.Fatalf("daemon handler: %v", err)
 	}

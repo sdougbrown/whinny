@@ -1,9 +1,30 @@
 package daemon
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestValidateRequiresSelfUserID(t *testing.T) {
+	// An empty self identity is rejected in both modes: the firebreak
+	// would match every post and the daemon would self-wake.
+	cfg := Config{Mode: ModeResident, Deliver: DeliverExec}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "user_id") {
+		t.Errorf("Validate = %v, want an error naming self.user_id", err)
+	}
+	// A valid user id passes in both modes (shared mode uses the same
+	// identity for self-post subscription).
+	cfg.Self.UserID = "u9"
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate resident with user id = %v, want nil", err)
+	}
+	cfg.Mode = ModeShared
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate shared with user id = %v, want nil", err)
+	}
+}
 
 func TestWithDefaultsAmbientValves(t *testing.T) {
 	// Gate enabled, min spacing unset: it defaults to 30m, like the

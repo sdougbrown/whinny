@@ -137,8 +137,14 @@ func (c Config) WithDefaults() Config {
 	return c
 }
 
-// Validate rejects an unknown mode or delivery backend.
+// Validate rejects an unknown mode or delivery backend, and an empty
+// self identity: with an empty user id the self-post firebreak
+// (m.From.UserID == Self.UserID) matches every post, and the daemon
+// would evaluate its own posts and self-wake.
 func (c Config) Validate() error {
+	if c.Self.UserID == "" {
+		return fmt.Errorf("self.user_id is empty: set it to the bot's apron user id (the self-post firebreak compares against it)")
+	}
 	switch c.Mode {
 	case ModeResident, ModeShared:
 	default:

@@ -951,7 +951,7 @@ func TestRunValidatesConfig(t *testing.T) {
 	}
 	// exec without ExecCmd: Run rejects the backend before it dials,
 	// so the error names the missing exec command (no server needed).
-	if err := Run(context.Background(), Config{URL: "ws://apron.test/ws", Token: "tok", Deliver: "exec"}, deps); err == nil || !strings.Contains(err.Error(), "exec command") {
+	if err := Run(context.Background(), Config{URL: "ws://apron.test/ws", Token: "tok", Deliver: "exec", Self: wake.Self{UserID: "u9"}}, deps); err == nil || !strings.Contains(err.Error(), "exec command") {
 		t.Errorf("exec without ExecCmd: Run = %v, want the ValidateBackend error naming the exec command", err)
 	}
 	if err := Run(context.Background(), baseCfg(), Deps{Deliver: newFakeDeliverer()}); err == nil {
@@ -972,10 +972,10 @@ func TestRunValidatesBackendBeforeConnect(t *testing.T) {
 	}
 	defer st.Close()
 	deps := Deps{Store: st, Deliver: newFakeDeliverer()}
-	if err := Run(context.Background(), Config{URL: "ws://apron.test/ws", Token: "tok", Deliver: "exec"}, deps); err == nil || !strings.Contains(err.Error(), "exec command") {
+	if err := Run(context.Background(), Config{URL: "ws://apron.test/ws", Token: "tok", Deliver: "exec", Self: wake.Self{UserID: "u9"}}, deps); err == nil || !strings.Contains(err.Error(), "exec command") {
 		t.Errorf("exec without ExecCmd: Run = %v, want the ValidateBackend error naming the exec command", err)
 	}
-	if err := Run(context.Background(), Config{URL: "ws://apron.test/ws", Token: "tok", Deliver: "socket"}, deps); err == nil || !strings.Contains(err.Error(), "socket URL") {
+	if err := Run(context.Background(), Config{URL: "ws://apron.test/ws", Token: "tok", Deliver: "socket", Self: wake.Self{UserID: "u9"}}, deps); err == nil || !strings.Contains(err.Error(), "socket URL") {
 		t.Errorf("socket without SocketURL: Run = %v, want the ValidateBackend error naming the socket URL", err)
 	}
 }
