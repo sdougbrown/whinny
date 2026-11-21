@@ -57,13 +57,13 @@ type GuardInput struct {
 	Now time.Time
 }
 
-// Chain evaluates guards in fixed order (breaker, quiet, rate-limit); the
-// first denial wins. Evaluate decides without side effects and consumes a
-// bucket token only when the send is allowed, so a denial never drains
-// the bucket. Quiet is checked before the rate take precisely so a
-// quiet denial never consumes a token. The chain owns the default rate
-// bucket built from the config, so bucket state persists across
-// Evaluate calls.
+// Chain evaluates guards in fixed order (breaker, quiet, rate-limit);
+// the first denial wins. The rate step is a single Take: consume-or-
+// deny for both bucket kinds (in-memory: refill + consume under one
+// mutex hold; store-backed: one atomic transaction), so a denial never
+// drains the bucket and a quiet denial never consumes a token. The
+// chain owns the default rate bucket built from the config, so bucket
+// state persists across Evaluate calls.
 type Chain struct {
 	bucket *RateBucket
 }
@@ -74,8 +74,9 @@ func NewChain(cfg Config) *Chain {
 }
 
 // Evaluate runs the guards in precedence order (breaker, quiet,
-// rate-limit) without side effects and returns the first denial, if any.
-// When the send is allowed it consumes one bucket token.
+// rate-limit) and returns the first denial, if any. When the send is
+// allowed it has consumed one bucket token in the rate step (Take is
+// consume-or-deny for both bucket kinds).
 func (c *Chain) Evaluate(in GuardInput) (Denial, bool) {
 	if d, denied := checkBreaker(in); denied {
 		return d, true
@@ -83,19 +84,12 @@ func (c *Chain) Evaluate(in GuardInput) (Denial, bool) {
 	if d, denied := checkQuiet(in); denied {
 		return d, true
 	}
-	// Rate limit comes last because a store-backed bucket consumes its
-	// token inside the check (one atomic transaction); checking quiet
-	// first keeps a quiet denial from consuming a token. When the bucket
-	// is empty AND the room is quiet, the caller sees refused-quiet.
+	// Rate limit comes last: the take is consume-or-deny (in-memory:
+	// refill + consume under one mutex hold; store-backed: one atomic
+	// transaction), so a quiet denial never consumes a token and two
+	// concurrent Evaluates can never both pass the check.
 	if d, denied := checkRateLimit(c, in); denied {
 		return d, true
-	}
-	b := c.bucket
-	if in.Bucket != nil {
-		b = in.Bucket
-	}
-	if b != nil && b.cap > 0 {
-		b.Take(in.Now)
 	}
 	return Denial{}, false
 }
@@ -111,9 +105,11 @@ func checkBreaker(in GuardInput) (Denial, bool) {
 	return Denial{Kind: KindRefusedBreaker, Text: text}, true
 }
 
-// checkRateLimit reports a denial when the bucket cannot serve a token
-// now. It does not consume: a zero-capacity bucket (PerMinute <= 0)
-// fails closed, and an empty bucket is already out of tokens.
+// checkRateLimit takes one token: Take is consume-or-deny for both
+// bucket kinds (in-memory: refill + consume under one mutex hold;
+// store-backed: one atomic transaction). A zero-capacity bucket
+// (PerMinute <= 0) fails closed, and a take error (store-backed)
+// denies with a 1s retry-after.
 func checkRateLimit(c *Chain, in GuardInput) (Denial, bool) {
 	b := c.bucket
 	if in.Bucket != nil {
@@ -122,7 +118,15 @@ func checkRateLimit(c *Chain, in GuardInput) (Denial, bool) {
 	if b == nil || b.cap <= 0 {
 		return Denial{Kind: KindRefusedRateLimit, Text: "rate limit: no tokens available"}, true
 	}
-	if ok, wait := b.CanServe(in.Now); !ok {
+	ok, wait, err := b.Take(in.Now)
+	if err != nil {
+		return Denial{
+			Kind:       KindRefusedRateLimit,
+			RetryAfter: time.Second,
+			Text:       "rate limit: storage error",
+		}, true
+	}
+	if !ok {
 		return Denial{
 			Kind:       KindRefusedRateLimit,
 			RetryAfter: wait,
@@ -185,20 +189,11 @@ func NewStoreBucket(s *store.Store, perMinute int) *RateBucket {
 	return b
 }
 
-// CanServe reports whether a token is available at now without consuming
-// one. It refills first; the refill advances the bucket's clock but
-// never takes a token. On a store-backed bucket (takeFn set), CanServe
-// is the atomic take: it refills, takes, and persists in one
-// transaction, and a persistence error denies (fail closed) with a 1s
-// retry-after.
+// CanServe reports whether a token is available at now without
+// consuming one. It refills first; the refill advances the bucket's
+// clock but never takes a token. It is the in-memory check-only path;
+// the consume-or-deny step is Take.
 func (b *RateBucket) CanServe(now time.Time) (bool, time.Duration) {
-	if b.takeFn != nil {
-		ok, wait, err := b.takeFn(now)
-		if err != nil {
-			return false, time.Second
-		}
-		return ok, wait
-	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.cap <= 0 {
@@ -210,18 +205,26 @@ func (b *RateBucket) CanServe(now time.Time) (bool, time.Duration) {
 	return ok, wait
 }
 
-// Take consumes one token at now, refilling first. It reports whether a
-// token was available and, if not, the wait until the next one. On a
-// store-backed bucket (takeFn set), Take is a no-op: the take already
-// happened in CanServe.
-func (b *RateBucket) Take(now time.Time) (bool, time.Duration) {
+// Take consumes one token at now, refilling first, and reports whether
+// a token was available and, if not, the wait until the next one. It
+// is the single consume-or-deny step for both bucket kinds: in-memory,
+// the (refill, take) is one mutex hold; store-backed (takeFn set), the
+// (refill, take, persist) is one atomic transaction, so a denial never
+// leaves the bucket drained and a take is never lost to a concurrent
+// caller. A persistence error denies (fail closed) with a 1s
+// retry-after.
+func (b *RateBucket) Take(now time.Time) (bool, time.Duration, error) {
 	if b.takeFn != nil {
-		return true, 0
+		ok, wait, err := b.takeFn(now)
+		if err != nil {
+			return false, time.Second, err
+		}
+		return ok, wait, nil
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.cap <= 0 {
-		return false, 0
+		return false, 0, nil
 	}
 	st, _ := rate.Refill(rate.State{Tokens: b.tokens, Last: b.last}, int(b.cap), now)
 	ok, wait := rate.Available(st, int(b.cap))
@@ -229,5 +232,5 @@ func (b *RateBucket) Take(now time.Time) (bool, time.Duration) {
 		st = rate.Take(st)
 		b.tokens, b.last = st.Tokens, st.Last
 	}
-	return ok, wait
+	return ok, wait, nil
 }

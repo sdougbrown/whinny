@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,10 +17,10 @@ var t0 = time.Unix(1_000_000, 0)
 func emptyBucket(t *testing.T) *RateBucket {
 	t.Helper()
 	b := NewRateBucket(Config{PerMinute: 2})
-	if ok, _ := b.Take(t0); !ok {
+	if ok, _, _ := b.Take(t0); !ok {
 		t.Fatal("first Take failed")
 	}
-	if ok, _ := b.Take(t0); !ok {
+	if ok, _, _ := b.Take(t0); !ok {
 		t.Fatal("second Take failed")
 	}
 	return b
@@ -133,32 +134,32 @@ func TestChainOwnedBucket(t *testing.T) {
 func TestBucketRefill(t *testing.T) {
 	b := NewRateBucket(Config{PerMinute: 2}) // refill: 1 token per 30s
 
-	if ok, wait := b.Take(t0); !ok || wait != 0 {
-		t.Fatalf("Take t0 = (%v, %v), want (true, 0)", ok, wait)
+	if ok, wait, err := b.Take(t0); err != nil || !ok || wait != 0 {
+		t.Fatalf("Take t0 = (%v, %v, %v), want (true, 0, nil)", ok, wait, err)
 	}
-	if ok, _ := b.Take(t0); !ok {
+	if ok, _, _ := b.Take(t0); !ok {
 		t.Fatal("Take t0 (2nd) failed")
 	}
-	if ok, wait := b.Take(t0); ok || wait != 30*time.Second {
+	if ok, wait, _ := b.Take(t0); ok || wait != 30*time.Second {
 		t.Errorf("Take t0 (3rd) = (%v, %v), want (false, 30s)", ok, wait)
 	}
 	// Half a refill period in: 0.5 tokens, 15s to the next.
-	if ok, wait := b.Take(t0.Add(15 * time.Second)); ok || wait != 15*time.Second {
+	if ok, wait, _ := b.Take(t0.Add(15 * time.Second)); ok || wait != 15*time.Second {
 		t.Errorf("Take t0+15s = (%v, %v), want (false, 15s)", ok, wait)
 	}
 	// A full refill period in: one token available again.
-	if ok, _ := b.Take(t0.Add(30 * time.Second)); !ok {
+	if ok, _, _ := b.Take(t0.Add(30 * time.Second)); !ok {
 		t.Error("Take t0+30s failed, want true")
 	}
 
 	// Refill is capped at capacity.
 	b2 := NewRateBucket(Config{PerMinute: 2})
-	if ok, _ := b2.Take(t0); !ok {
+	if ok, _, _ := b2.Take(t0); !ok {
 		t.Fatal("b2 Take t0 failed")
 	}
 	later := t0.Add(10 * time.Hour)
 	for i, want := range []bool{true, true, false} {
-		ok, _ := b2.Take(later)
+		ok, _, _ := b2.Take(later)
 		if ok != want {
 			t.Fatalf("b2 Take %d at t0+10h = %v, want %v", i+1, ok, want)
 		}
@@ -278,8 +279,75 @@ func TestStoreBucketChain(t *testing.T) {
 	}
 	// The state persisted: a second bucket on the same store is empty.
 	b2 := NewStoreBucket(s, 2)
-	if ok, wait := b2.CanServe(t0); ok || wait == 0 {
-		t.Errorf("second bucket CanServe = (%v, %v), want (false, non-zero) (state persisted)", ok, wait)
+	if ok, wait, _ := b2.Take(t0); ok || wait == 0 {
+		t.Errorf("second bucket Take = (%v, %v), want (false, non-zero) (state persisted)", ok, wait)
+	}
+}
+
+// TestConcurrentInMemoryBucket: N concurrent Evaluates on an
+// in-memory perMinute=2 bucket admit exactly 2: the take is
+// consume-or-deny under one mutex hold, so no two callers can both
+// pass the check and over-consume.
+func TestConcurrentInMemoryBucket(t *testing.T) {
+	chain := NewChain(Config{PerMinute: 2})
+	const n = 8
+	allowed := make(chan bool, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, denied := chain.Evaluate(GuardInput{Now: t0})
+			allowed <- !denied
+		}()
+	}
+	wg.Wait()
+	close(allowed)
+	count := 0
+	for ok := range allowed {
+		if ok {
+			count++
+		}
+	}
+	if count != 2 {
+		t.Errorf("allowed = %d, want exactly 2", count)
+	}
+}
+
+// TestConcurrentStoreBucket: the same, via the temp-store pattern: N
+// concurrent Evaluates on a store-backed perMinute=2 bucket admit
+// exactly 2 (the take is one atomic transaction).
+func TestConcurrentStoreBucket(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	s, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer s.Close()
+
+	chain := NewChain(Config{PerMinute: 2})
+	b := NewStoreBucket(s, 2)
+	const n = 8
+	allowed := make(chan bool, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, denied := chain.Evaluate(GuardInput{Bucket: b, Now: t0})
+			allowed <- !denied
+		}()
+	}
+	wg.Wait()
+	close(allowed)
+	count := 0
+	for ok := range allowed {
+		if ok {
+			count++
+		}
+	}
+	if count != 2 {
+		t.Errorf("allowed = %d, want exactly 2", count)
 	}
 }
 
