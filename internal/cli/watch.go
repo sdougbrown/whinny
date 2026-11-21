@@ -43,6 +43,9 @@ func AddWatchHandler(d Deps) clicontract.HandleFunc {
 		if pattern != "" && replyTo != "" {
 			return nil, UsageErrorf("watch add: --pattern and --reply-to are mutually exclusive")
 		}
+		if thread != "" && replyTo != "" {
+			return nil, UsageErrorf("watch add: --thread and --reply-to are mutually exclusive")
+		}
 		owner := inv.Flags["owner"]
 		onFire := inv.Flags["on-fire"]
 		if owner == "" && onFire != "" {
