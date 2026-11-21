@@ -204,16 +204,7 @@ func (d *daemon) autoSubscribe(ctx context.Context) bool {
 
 // drain delivers and removes every queued wake for this agent.
 func (d *daemon) drain(ctx context.Context) error {
-	wakes, err := d.store.DequeueWakes(ctx, d.cfg.Agent)
-	if err != nil {
-		return err
-	}
-	for _, w := range wakes {
-		if err := d.dlv.Deliver(ctx, w.Agent, decodePayload(w.Payload)); err != nil {
-			log.Printf("daemon: deliver queued wake %d: %v", w.ID, err)
-		}
-	}
-	return nil
+	return d.flushQueue(ctx)
 }
 
 // catchUp replays the messages missed while the daemon was down (or
@@ -363,17 +354,21 @@ func (d *daemon) handleResident(ctx context.Context, m *apronws.Message) {
 }
 
 // flushQueue delivers and removes every queued wake for this agent.
-func (d *daemon) flushQueue(ctx context.Context) {
+// A dequeue error is logged and returned; the caller decides whether
+// it is fatal (the startup drain propagates it, the live loop does
+// not).
+func (d *daemon) flushQueue(ctx context.Context) error {
 	wakes, err := d.store.DequeueWakes(ctx, d.cfg.Agent)
 	if err != nil {
 		log.Printf("daemon: dequeue wakes: %v", err)
-		return
+		return err
 	}
 	for _, w := range wakes {
 		if err := d.dlv.Deliver(ctx, w.Agent, decodePayload(w.Payload)); err != nil {
 			log.Printf("daemon: deliver wake %d: %v", w.ID, err)
 		}
 	}
+	return nil
 }
 
 // lookupAuthor resolves the reply target's author, retrying a failed
