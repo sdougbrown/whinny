@@ -27,16 +27,25 @@ APRON_DIR="${APRON_SERVER_DIR:-$HOME/Code/apron-server-go}"
 WORK="$(mktemp -d)"
 APROND_PID=""
 DAEMON_PID=""
+FAILED=0
 
 cleanup() {
   [[ -n "$DAEMON_PID" ]] && kill "$DAEMON_PID" 2>/dev/null || true
   [[ -n "$APROND_PID" ]] && kill "$APROND_PID" 2>/dev/null || true
-  rm -rf "$WORK"
+  # Reap the killed processes so their exit codes don't leak out of the
+  # trap.
+  [[ -n "$DAEMON_PID" ]] && wait "$DAEMON_PID" 2>/dev/null || true
+  [[ -n "$APROND_PID" ]] && wait "$APROND_PID" 2>/dev/null || true
+  if [[ "$FAILED" -eq 1 ]]; then
+    printf 'e2e: artifacts kept at %s\n' "$WORK"
+  else
+    rm -rf "$WORK"
+  fi
 }
 trap cleanup EXIT
 
 log()  { printf 'e2e: %s\n' "$*"; }
-fail() { printf 'e2e: FAIL: %s\n' "$*" >&2; exit 1; }
+fail() { printf 'e2e: FAIL: %s\n' "$*" >&2; FAILED=1; exit 1; }
 
 # Build with the toolchain each repo's go.mod asks for, using a cached
 # one when the local go is older (GOTOOLCHAIN=local would refuse).
@@ -96,6 +105,10 @@ log "PASS: aprond healthy"
 enroll() { # <email> <user-id> <name>; prints the session token
   local out
   out="$("$WORK/aprontool" enroll --url "$URL" --email "$1" --user-id "$2" --name "$3" --log "$WORK/aprond.log")"
+  # Positive control: the helper's output must carry the user_id we
+  # asked for, or the user_id greps below would pass vacuously.
+  grep -q "\"user_id\":\"$2\"" <<<"$out" \
+    || fail "enrollment output for $2 does not carry its user_id: $out"
   python3 -c 'import json,sys; print(json.loads(sys.argv[1])["token"])' "$out"
 }
 BOT_TOKEN="$(enroll whinny-e2e@apron.local whinny-e2e Whinny)"
