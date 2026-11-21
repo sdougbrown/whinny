@@ -14,6 +14,7 @@ import (
 
 	"github.com/sdougbrown/cli-contract"
 	"github.com/sdougbrown/cli-contract/registry"
+	"github.com/sdougbrown/whinny/internal/daemon"
 	"github.com/sdougbrown/whinny/internal/store"
 )
 
@@ -38,6 +39,9 @@ type Deps struct {
 	Env func(string) string
 	// Stdin is read for `post -`; nil reads os.Stdin.
 	Stdin io.Reader
+	// RunDaemon is the daemon entry point the daemon command calls;
+	// nil uses daemon.Run (tests stub it).
+	RunDaemon func(ctx context.Context, cfg daemon.Config, deps daemon.Deps) error
 }
 
 func (d Deps) env() func(string) string {
@@ -86,6 +90,10 @@ func App(d Deps) *clicontract.App {
 		Version:     Version,
 		RootShort:   "talk to apron rooms from the command line",
 		ErrorPrefix: Name,
+		// The daemon command installs its own SIGINT/SIGTERM wiring so it
+		// can exit 0 on shutdown; the library stays out of the way for
+		// every command.
+		HandlerOwnedSignals: true,
 		CommonFlags: []clicontract.Flag{
 			{Name: "url", Kind: clicontract.String, Usage: "apron endpoint (default $WHINNY_URL, $APRON_URL, " + DefaultURL + ")"},
 			{Name: "token", Kind: clicontract.String, Usage: "apron auth token (default $WHINNY_TOKEN, $APRON_TOKEN)"},
@@ -166,6 +174,28 @@ func App(d Deps) *clicontract.App {
 						Handle: ListWatchesHandler(d),
 					},
 				},
+			},
+			{
+				Name:  "daemon",
+				Short: "run the wake daemon (long-running)",
+				Long: "Hold the apron connection, evaluate the wake policy over " +
+					"inbound messages, and deliver wake envelopes through the " +
+					"configured backend. Modes: resident (full policy, durable " +
+					"wake queue) or shared (watch hits only, fire-and-forget). " +
+					"Backends: exec and resume spawn --exec-cmd with the envelope " +
+					"on stdin; socket POSTs JSON to --socket-url; feed writes " +
+					"JSON lines to stdout (the poo feed contract). " +
+					"SIGINT/SIGTERM shut the daemon down cleanly; the process " +
+					"exits 0.",
+				Flags: []clicontract.Flag{
+					{Name: "mode", Kind: clicontract.String, Usage: "resident or shared (default resident; $WHINNY_DAEMON_MODE)"},
+					{Name: "deliver", Kind: clicontract.String, Usage: "exec, resume, socket, or feed (default exec; $WHINNY_DAEMON_DELIVER)"},
+					{Name: "exec-cmd", Kind: clicontract.String, Usage: "command exec/resume spawns per wake; envelope on stdin (shell-split)"},
+					{Name: "socket-url", Kind: clicontract.String, Usage: "POST endpoint for the socket backend"},
+					{Name: "config", Kind: clicontract.String, Usage: "daemon config JSON (default $WHINNY_CONFIG, ~/.config/whinny/daemon.json; non-secret parts)"},
+				},
+				Output: clicontract.Output{Mode: clicontract.OutputRaw, SuccessExitCodes: []int{0}},
+				Raw:    DaemonHandler(d),
 			},
 			{
 				Name:  "schema",
