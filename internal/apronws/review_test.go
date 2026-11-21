@@ -37,9 +37,7 @@ func TestInFlightFailure(t *testing.T) {
 	}
 
 	reconnected := make(chan struct{})
-	c.mu.Lock()
-	c.OnReconnect = func() { close(reconnected) }
-	c.mu.Unlock()
+	c.SetOnReconnect(func() { close(reconnected) })
 
 	// Part 1: a Send in flight when the connection drops → ErrConnectionLost.
 	errCh := make(chan error, 1)

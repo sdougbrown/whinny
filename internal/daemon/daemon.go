@@ -90,10 +90,26 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 		newTicker = newRealTicker
 	}
 
+	d := &daemon{
+		cfg:   cfg,
+		store: deps.Store,
+		dlv:   deps.Deliver,
+		now:   now,
+		clock: clock,
+		gate:  newAmbientGate(cfg),
+		class: classifierClient(cfg),
+	}
+
+	// Reconnect catch-up: when the connection drops and reconnects, the
+	// messages missed in the gap are replayed from history (the cursor
+	// bounds the window). The hook runs in its own goroutine, off the
+	// client's read loop.
+	catchUp := func() { d.catchUp(ctx) }
+
 	client := deps.Client
 	if client == nil {
 		var err error
-		client, err = apronws.Connect(ctx, apronws.Options{URL: cfg.URL, Token: cfg.Token})
+		client, err = apronws.Connect(ctx, apronws.Options{URL: cfg.URL, Token: cfg.Token, OnReconnect: catchUp})
 		if err != nil {
 			return err
 		}
@@ -102,27 +118,11 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 		// bot's rooms arrive from here on. Operators and scripts wait on
 		// this line to know the daemon is live.
 		log.Printf("daemon: connected to %s", cfg.URL)
+	} else {
+		client.SetOnReconnect(catchUp)
 	}
-
-	d := &daemon{
-		cfg:    cfg,
-		store:  deps.Store,
-		client: client,
-		dlv:    deps.Deliver,
-		now:    now,
-		clock:  clock,
-		gate:   newAmbientGate(cfg),
-		class:  classifierClient(cfg),
-		hist:   newHistoryCache(client),
-	}
-
-	// Reconnect catch-up: when the connection drops and reconnects, the
-	// messages missed in the gap are replayed from history (the cursor
-	// bounds the window). The hook runs in its own goroutine, off the
-	// client's read loop.
-	client.OnReconnect = func() {
-		d.catchUp(ctx)
-	}
+	d.client = client
+	d.hist = newHistoryCache(client)
 
 	// Drain stale queue entries for this agent before the loop: a wake
 	// enqueued before a crash fires now. The store's dequeue is

@@ -93,9 +93,7 @@ func TestSendFailsBeforeAuth(t *testing.T) {
 	}
 
 	reconnected := make(chan struct{})
-	c.mu.Lock()
-	c.OnReconnect = func() { close(reconnected) }
-	c.mu.Unlock()
+	c.SetOnReconnect(func() { close(reconnected) })
 	go func() {
 		if err := fc2.handshake(ctx, 30); err != nil {
 			t.Error(err)

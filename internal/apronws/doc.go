@@ -5,5 +5,6 @@
 // application-level pings on the server-suggested interval, and reconnects
 // with exponential backoff (1s to 30s), re-authing on each attempt. Inbound
 // pushes are decoded and delivered on Records. Pushes are not replayed across
-// reconnects; set OnReconnect to re-run catch-up (e.g., History).
+// reconnects; set Options.OnReconnect (or SetOnReconnect) to re-run catch-up
+// (e.g., History).
 package apronws

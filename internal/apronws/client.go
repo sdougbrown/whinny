@@ -20,6 +20,10 @@ type Options struct {
 	URL string
 	// Token is the auth token, sent with the "token" scheme.
 	Token string
+	// OnReconnect, if set, is called on each successful reconnect after
+	// the initial connect. It runs in its own goroutine, off the client's
+	// read loop; keep it short and non-blocking.
+	OnReconnect func()
 }
 
 // Client is an apron WebSocket client.
@@ -38,10 +42,10 @@ type Client struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 
-	// OnReconnect, if set, is called on each successful reconnect after
+	// onReconnect, if set, is called on each successful reconnect after
 	// the initial connect. It runs in its own goroutine, off the client's
 	// read loop; keep it short and non-blocking.
-	OnReconnect func()
+	onReconnect func()
 
 	mu     sync.Mutex
 	live   *live
@@ -69,10 +73,11 @@ type live struct {
 // and reconnect loops.
 func Connect(ctx context.Context, opts Options) (*Client, error) {
 	c := &Client{
-		opts:    opts,
-		url:     wsURL(opts.URL),
-		pending: make(map[string]*pending),
-		records: make(chan Record, 256),
+		opts:        opts,
+		url:         wsURL(opts.URL),
+		onReconnect: opts.OnReconnect,
+		pending:     make(map[string]*pending),
+		records:     make(chan Record, 256),
 	}
 	c.ctx, c.cancel = context.WithCancel(ctx)
 	c.done = make(chan struct{})
@@ -82,6 +87,16 @@ func Connect(ctx context.Context, opts Options) (*Client, error) {
 	}
 	go c.run()
 	return c, nil
+}
+
+// SetOnReconnect sets the hook called on each successful reconnect after
+// the initial connect. It runs in its own goroutine, off the client's
+// read loop; keep it short and non-blocking. It may be called while the
+// client is running.
+func (c *Client) SetOnReconnect(fn func()) {
+	c.mu.Lock()
+	c.onReconnect = fn
+	c.mu.Unlock()
 }
 
 // Close stops the client: it stops reconnecting, closes the connection, and
@@ -508,16 +523,17 @@ func (c *Client) run() {
 			continue
 		}
 		backoff = time.Second
-		if hook := c.onReconnect(); hook != nil {
+		if hook := c.reconnectHook(); hook != nil {
 			go hook()
 		}
 	}
 }
 
-func (c *Client) onReconnect() func() {
+// reconnectHook returns the current reconnect hook.
+func (c *Client) reconnectHook() func() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.OnReconnect
+	return c.onReconnect
 }
 
 // readLoop dispatches frames until the connection dies or the client's

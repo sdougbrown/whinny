@@ -28,9 +28,7 @@ func TestReconnect(t *testing.T) {
 	defer c.Close()
 
 	reconnected := make(chan struct{})
-	c.mu.Lock()
-	c.OnReconnect = func() { close(reconnected) }
-	c.mu.Unlock()
+	c.SetOnReconnect(func() { close(reconnected) })
 
 	fc1, err := f.waitConn(1)
 	if err != nil {
@@ -81,6 +79,88 @@ func TestReconnect(t *testing.T) {
 	}
 }
 
+// TestSetOnReconnectAfterConnect swaps the reconnect hook while the
+// client is running: the first reconnect runs the hook set via Options,
+// the second runs the swapped-in hook.
+func TestSetOnReconnectAfterConnect(t *testing.T) {
+	f := newFakeServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	first := make(chan struct{})
+	second := make(chan struct{})
+	go func() {
+		fc, err := f.waitConn(1)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if err := fc.handshake(ctx, 30); err != nil {
+			t.Error(err)
+		}
+	}()
+	c, err := Connect(ctx, Options{URL: f.wsURL(), Token: "test-token", OnReconnect: func() { close(first) }})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer c.Close()
+
+	// Reconnect #1: the hook set via Options fires.
+	fc1, err := f.waitConn(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fc1.close()
+	if err := fc1.waitForClose(); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		fc2, err := f.waitConn(2)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		fc2.wantToken = "tok-2" // the client re-auths with the rotated token
+		if err := fc2.handshake(ctx, 30); err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case <-first:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for the first reconnect hook")
+	}
+
+	// Swap the hook while the client runs.
+	c.SetOnReconnect(func() { close(second) })
+
+	// Reconnect #2: the swapped-in hook fires.
+	fc2, err := f.waitConn(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fc2.close()
+	if err := fc2.waitForClose(); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		fc3, err := f.waitConn(3)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		fc3.wantToken = "tok-2" // the client re-auths with the rotated token
+		if err := fc3.handshake(ctx, 30); err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case <-second:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for the swapped reconnect hook")
+	}
+}
+
 func TestKeepalive(t *testing.T) {
 	f := newFakeServer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
@@ -103,9 +183,7 @@ func TestKeepalive(t *testing.T) {
 	defer c.Close()
 
 	reconnected := make(chan struct{})
-	c.mu.Lock()
-	c.OnReconnect = func() { close(reconnected) }
-	c.mu.Unlock()
+	c.SetOnReconnect(func() { close(reconnected) })
 
 	fc, err := f.waitConn(1)
 	if err != nil {
