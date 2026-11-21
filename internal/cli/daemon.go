@@ -153,6 +153,11 @@ func ResolveDaemonConfig(inv clicontract.Invocation, env func(string) string) (d
 		if err != nil {
 			return daemon.Config{}, UsageErrorf("daemon: config %s: %v", path, err)
 		}
+	} else if !os.IsNotExist(err) {
+		// A default config that does not exist is fine; one that cannot
+		// be read is a real problem and must not silently become
+		// defaults.
+		return daemon.Config{}, UsageErrorf("daemon: read config %s: %v", path, err)
 	}
 
 	endpoint, err := ResolveConfig(inv.Flags["url"], inv.Flags["token"], env)

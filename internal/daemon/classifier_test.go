@@ -5,15 +5,19 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/sdougbrown/whinny/internal/wake"
 )
 
 func TestHTTPClassifier(t *testing.T) {
-	var gotBody map[string]any
+	var bodyMu sync.Mutex
+	gotBody := map[string]any{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/directed-p", func(w http.ResponseWriter, r *http.Request) {
+		bodyMu.Lock()
+		defer bodyMu.Unlock()
 		json.NewDecoder(r.Body).Decode(&gotBody)
 		w.Write([]byte(`{"directed":false,"p":0.9}`))
 	})
@@ -34,9 +38,11 @@ func TestHTTPClassifier(t *testing.T) {
 	if err != nil || !directed {
 		t.Errorf("p=0.9: directed = %v, err = %v; want true, nil", directed, err)
 	}
+	bodyMu.Lock()
 	if gotBody["from"] != "u1" || gotBody["text"] != "hey" {
 		t.Errorf("request body = %v, want from u1 text hey", gotBody)
 	}
+	bodyMu.Unlock()
 
 	c.Endpoint = srv.URL + "/directed-p-low"
 	directed, err = c.IsDirected(context.Background(), wake.Msg{}, wake.Self{})
