@@ -14,7 +14,8 @@ and a `peers` map distinguishes bots from humans. The **send path** is the
 single outbound surface (`whinny post`): every post runs the guard chain —
 persisted rate bucket, breaker, quiet gate — and refusals come back as typed
 denials (`refused-rate-limit`, `refused-breaker`, `refused-quiet`), never as prompt
-machinery.
+machinery. The breaker trips on five consecutive bad send outcomes (rate-limit
+denials or failed posts) and latches until `whinny breaker-clear` releases it.
 
 whinny speaks [Apron](https://github.com/shazow/apron) protocol v9 over
 WebSockets (`internal/apronws`) and keeps its state in one SQLite database
@@ -79,6 +80,8 @@ Common flags on every command: `--url <endpoint>` (`$WHINNY_URL`, then
   until the period ends (default 8h; `--for 0` is indefinite). Records keep
   flowing; quiet only gates sends.
 - `whinny resume` — clear the quiet gate.
+- `whinny breaker-clear` — clear the send-path breaker latch and reset the
+  consecutive post-failure counter, so the next post is allowed.
 - `whinny daemon` — run the wake daemon (long-running). Flags:
   `--mode resident|shared` (`$WHINNY_DAEMON_MODE`), `--deliver
   exec|resume|socket|feed` (`$WHINNY_DAEMON_DELIVER`), `--exec-cmd <cmd>`
@@ -163,7 +166,8 @@ One SQLite database (`$WHINNY_DB`, default `~/.local/share/whinny/state.db`):
 - `breaker` — single-row circuit breaker (latched, when, why).
 - `cursors` — per-room last-seen `log_id`, maintained by the daemon.
 - `meta` — guard state: `quiet_until` (the send-path quiet gate), the
-  persisted rate bucket, `delivery:<owner>` shared-mode callbacks,
+  persisted rate bucket, `post_failures` (the breaker trip counter),
+  `delivery:<owner>` shared-mode callbacks,
   `auto_subscribe`.
 
 **Environment variables**: `WHINNY_URL` / `APRON_URL` (endpoint),
@@ -174,8 +178,6 @@ default 20).
 
 ## Known gaps (v1)
 
-- No breaker-latching path exists yet outside tests: `refused-breaker` is
-  a live guard once a latching writer lands.
 - Feed image fetch is same-origin restricted and capped.
 - Delivery runs synchronously in the record loop: a slow deliverer can
   backpressure the connection.

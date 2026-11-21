@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strconv"
 )
 
 // Breaker is the send-path breaker latch.
@@ -12,6 +13,11 @@ type Breaker struct {
 	LatchedAt int64 // unix seconds; 0 when not latched
 	Reason    string
 }
+
+// MetaPostFailures is the meta key for the consecutive post-failure
+// count: the bad send outcomes (rate-limit denials and failed posts)
+// that trip the send-path breaker.
+const MetaPostFailures = "post_failures"
 
 // SetBreaker upserts the breaker row (id = 1).
 func (s *Store) SetBreaker(ctx context.Context, b Breaker) error {
@@ -54,4 +60,36 @@ func (s *Store) GetBreaker(ctx context.Context) (Breaker, error) {
 	b.LatchedAt = at.Int64
 	b.Reason = reason.String
 	return b, nil
+}
+
+// BumpPostFailures increments the consecutive post-failure count by
+// one and returns the new count. The increment is one upsert
+// (`value = value + 1`), so concurrent bumpers under the store's
+// write mutex — and cross-process writers under the database lock —
+// never lose an increment.
+func (s *Store) BumpPostFailures(ctx context.Context) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO meta (key, value) VALUES (?, '1')
+		 ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1`,
+		MetaPostFailures); err != nil {
+		return 0, err
+	}
+	var v string
+	if err := s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, MetaPostFailures).Scan(&v); err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(v)
+}
+
+// ResetPostFailures sets the consecutive post-failure count to 0.
+func (s *Store) ResetPostFailures(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO meta (key, value) VALUES (?, '0')
+		 ON CONFLICT(key) DO UPDATE SET value = '0'`,
+		MetaPostFailures)
+	return err
 }

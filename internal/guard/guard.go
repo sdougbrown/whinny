@@ -22,6 +22,10 @@ const (
 	KindRefusedQuiet = "refused-quiet"
 )
 
+// BreakerTripThreshold is the consecutive bad-outcome count (rate-
+// limit denials or failed posts) that latches the send-path breaker.
+const BreakerTripThreshold = 5
+
 // Config configures a guard chain.
 type Config struct {
 	// PerMinute is the send rate limit: the token-bucket capacity and
