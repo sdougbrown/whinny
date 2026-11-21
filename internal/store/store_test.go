@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/sdougbrown/whinny/internal/watch"
 )
 
 var testCtx = context.Background()
@@ -83,11 +85,34 @@ func TestMigrateIdempotentAndReopen(t *testing.T) {
 	}
 }
 
+func TestOpenMergesExistingQueryParams(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db") + "?foo=bar"
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	var fk int
+	if err := s.db.QueryRow(`PRAGMA foreign_keys`).Scan(&fk); err != nil {
+		t.Fatalf("PRAGMA foreign_keys: %v", err)
+	}
+	if fk != 1 {
+		t.Errorf("foreign_keys = %d, want 1", fk)
+	}
+	var mode string
+	if err := s.db.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil {
+		t.Fatalf("PRAGMA journal_mode: %v", err)
+	}
+	if mode != "wal" {
+		t.Errorf("journal_mode = %q, want wal", mode)
+	}
+}
+
 func TestWatchCRUD(t *testing.T) {
 	s := openTestStore(t)
 
-	w := Watch{RoomID: "room1", Kind: WatchKindPattern, Pattern: "hello", TTLS: 86400}
-	added, err := s.AddWatch(testCtx, w, testNow)
+	w := Watch{RoomID: "room1", Kind: watch.KindPattern, Pattern: "hello"}
+	added, err := s.AddWatch(testCtx, w, 86400, testNow)
 	if err != nil {
 		t.Fatalf("AddWatch: %v", err)
 	}
@@ -108,11 +133,16 @@ func TestWatchCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetWatch: %v", err)
 	}
-	if got != added {
+	if got.ID != added.ID || got.RoomID != added.RoomID || got.Owner != added.Owner ||
+		got.Kind != added.Kind || got.Pattern != added.Pattern ||
+		got.CreatedAt != added.CreatedAt || got.ExpiresAt != added.ExpiresAt {
 		t.Errorf("GetWatch = %+v, want %+v", got, added)
 	}
+	if got.Once == nil || !*got.Once {
+		t.Errorf("GetWatch Once = %v, want true (nil stored as true)", got.Once)
+	}
 
-	if _, err := s.AddWatch(testCtx, Watch{ID: "second", RoomID: "room2", Kind: WatchKindEdge, ReplyTo: "m1", TTLS: 100}, testNow); err != nil {
+	if _, err := s.AddWatch(testCtx, Watch{ID: "second", RoomID: "room2", Kind: watch.KindEdge, ReplyTo: "m1"}, 100, testNow); err != nil {
 		t.Fatalf("AddWatch second: %v", err)
 	}
 	list, err := s.ListWatches(testCtx)
@@ -135,7 +165,7 @@ func TestWatchOwnerColumn(t *testing.T) {
 	s := openTestStore(t)
 
 	// A custom owner round-trips through AddWatch/GetWatch.
-	added, err := s.AddWatch(testCtx, Watch{ID: "owned", RoomID: "room2", Kind: WatchKindEdge, ReplyTo: "m1", Owner: "agent-x", TTLS: 100}, testNow)
+	added, err := s.AddWatch(testCtx, Watch{ID: "owned", RoomID: "room2", Kind: watch.KindEdge, ReplyTo: "m1", Owner: "agent-x"}, 100, testNow)
 	if err != nil {
 		t.Fatalf("AddWatch: %v", err)
 	}
@@ -207,14 +237,14 @@ func TestOwnerColumnMigratesLegacyDatabase(t *testing.T) {
 		t.Errorf("legacy Owner = %q, want resident", w.Owner)
 	}
 	// New writes work on the migrated table.
-	if _, err := s.AddWatch(testCtx, Watch{ID: "new", RoomID: "room1", Kind: WatchKindEdge, ReplyTo: "m2", TTLS: 100}, testNow); err != nil {
+	if _, err := s.AddWatch(testCtx, Watch{ID: "new", RoomID: "room1", Kind: watch.KindEdge, ReplyTo: "m2"}, 100, testNow); err != nil {
 		t.Fatalf("AddWatch on migrated table: %v", err)
 	}
 }
 
 func TestDueWatchesBoundary(t *testing.T) {
 	s := openTestStore(t)
-	if _, err := s.AddWatch(testCtx, Watch{RoomID: "r", Kind: WatchKindEdge, ReplyTo: "m1", TTLS: 100}, testNow); err != nil {
+	if _, err := s.AddWatch(testCtx, Watch{RoomID: "r", Kind: watch.KindEdge, ReplyTo: "m1"}, 100, testNow); err != nil {
 		t.Fatalf("AddWatch: %v", err)
 	}
 
@@ -241,14 +271,29 @@ func TestDueWatchesBoundary(t *testing.T) {
 
 func TestWakeQueueBatch(t *testing.T) {
 	s := openTestStore(t)
-	for _, w := range []Wake{
-		{Agent: "a", Payload: "p1"},
-		{Agent: "a", Payload: "p2"},
-		{Agent: "b", Payload: "p3"},
-		{Agent: "a", Payload: "p4"},
-	} {
-		if err := s.EnqueueWake(testCtx, w, testNow); err != nil {
-			t.Fatalf("EnqueueWake %s: %v", w.Payload, err)
+	// Distinct CreatedAt per enqueue so the FIFO assertion is a real
+	// ordering check, not an autoincrement artifact.
+	wakes := []struct {
+		agent     string
+		payload   string
+		createdAt int64
+	}{
+		{"a", "p1", testNow.Unix()},
+		{"a", "p2", testNow.Unix() + 1},
+		{"b", "p3", testNow.Unix() + 2},
+		{"a", "p4", testNow.Unix() + 3},
+	}
+	var ids []int64
+	for _, w := range wakes {
+		id, err := s.EnqueueWake(testCtx, Wake{Agent: w.agent, Payload: w.payload, CreatedAt: w.createdAt}, time.Unix(w.createdAt, 0))
+		if err != nil {
+			t.Fatalf("EnqueueWake %s: %v", w.payload, err)
+		}
+		ids = append(ids, id)
+	}
+	for i := 1; i < len(ids); i++ {
+		if ids[i] <= ids[i-1] {
+			t.Fatalf("row ids not increasing: %v", ids)
 		}
 	}
 
@@ -264,9 +309,9 @@ func TestWakeQueueBatch(t *testing.T) {
 			t.Errorf("got[%d].Payload = %q, want %q (FIFO order)", i, got[i].Payload, want)
 		}
 	}
-	for _, w := range got {
-		if w.CreatedAt != testNow.Unix() {
-			t.Errorf("CreatedAt = %d, want %d", w.CreatedAt, testNow.Unix())
+	for i, want := range []int64{testNow.Unix(), testNow.Unix() + 1, testNow.Unix() + 3} {
+		if got[i].CreatedAt != want {
+			t.Errorf("got[%d].CreatedAt = %d, want %d", i, got[i].CreatedAt, want)
 		}
 	}
 
@@ -314,6 +359,18 @@ func TestBreakerPersistsAcrossReopen(t *testing.T) {
 	}
 	if got != b {
 		t.Errorf("GetBreaker = %+v, want %+v", got, b)
+	}
+
+	// Clearing goes through the same ON CONFLICT UPDATE path.
+	if err := s2.SetBreaker(testCtx, Breaker{}); err != nil {
+		t.Fatalf("SetBreaker clear: %v", err)
+	}
+	got, err = s2.GetBreaker(testCtx)
+	if err != nil {
+		t.Fatalf("GetBreaker after clear: %v", err)
+	}
+	if got != (Breaker{}) {
+		t.Errorf("GetBreaker after clear = %+v, want zero (not latched)", got)
 	}
 
 	// A fresh database reports a not-latched breaker.
@@ -373,24 +430,110 @@ func TestWatchValidation(t *testing.T) {
 	cases := []struct {
 		name string
 		w    Watch
-		want error
+		ttl  int
 	}{
-		{"bad kind", Watch{Kind: "nope", TTLS: 100}, ErrInvalidKind},
-		{"ttl zero", Watch{Kind: WatchKindEdge, TTLS: 0}, ErrInvalidTTL},
-		{"ttl negative", Watch{Kind: WatchKindEdge, TTLS: -1}, ErrInvalidTTL},
-		{"ttl over cap", Watch{Kind: WatchKindEdge, TTLS: MaxTTLSeconds + 1}, ErrInvalidTTL},
-		{"bad pattern", Watch{Kind: WatchKindPattern, Pattern: "(", TTLS: 100}, ErrInvalidPattern},
+		{"bad kind", Watch{RoomID: "r", Kind: "nope"}, 100},
+		{"missing room", Watch{Kind: watch.KindEdge, ReplyTo: "m1"}, 100},
+		{"edge missing reply", Watch{RoomID: "r", Kind: watch.KindEdge}, 100},
+		{"pattern empty", Watch{RoomID: "r", Kind: watch.KindPattern}, 100},
+		{"bad pattern", Watch{RoomID: "r", Kind: watch.KindPattern, Pattern: "("}, 100},
+		{"thread missing thread id", Watch{RoomID: "r", Kind: watch.KindThread}, 100},
+		{"subscription missing thread id", Watch{RoomID: "r", Kind: watch.KindSubscription}, 100},
+		{"ttl zero", Watch{RoomID: "r", Kind: watch.KindEdge, ReplyTo: "m1"}, 0},
+		{"ttl negative", Watch{RoomID: "r", Kind: watch.KindEdge, ReplyTo: "m1"}, -1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := s.AddWatch(testCtx, tc.w, testNow); !errors.Is(err, tc.want) {
-				t.Errorf("AddWatch err = %v, want %v", err, tc.want)
+			if _, err := s.AddWatch(testCtx, tc.w, tc.ttl, testNow); !errors.Is(err, ErrInvalidWatch) {
+				t.Errorf("AddWatch err = %v, want ErrInvalidWatch", err)
 			}
 		})
 	}
 
-	// Boundary: exactly the cap is accepted.
-	if _, err := s.AddWatch(testCtx, Watch{Kind: WatchKindEdge, TTLS: MaxTTLSeconds}, testNow); err != nil {
-		t.Errorf("AddWatch at cap: %v", err)
+	// A ttl beyond the cap is accepted; AddWatch caps the expiry instead.
+	if _, err := s.AddWatch(testCtx, Watch{RoomID: "r", Kind: watch.KindEdge, ReplyTo: "m1"}, MaxTTLSeconds+1, testNow); err != nil {
+		t.Errorf("AddWatch over cap: %v", err)
+	}
+}
+
+// TestExpiresAtCappedAtMaxTTL: a future CreatedAt is honored but the
+// expiry never exceeds now + MaxTTLSeconds.
+func TestExpiresAtCappedAtMaxTTL(t *testing.T) {
+	s := openTestStore(t)
+	future := testNow.Unix() + 2*MaxTTLSeconds
+	added, err := s.AddWatch(testCtx, Watch{ID: "capped", RoomID: "r", Kind: watch.KindEdge, ReplyTo: "m1", CreatedAt: future}, 86400, testNow)
+	if err != nil {
+		t.Fatalf("AddWatch: %v", err)
+	}
+	if added.CreatedAt != future {
+		t.Errorf("CreatedAt = %d, want %d (honored)", added.CreatedAt, future)
+	}
+	if added.ExpiresAt != testNow.Unix()+MaxTTLSeconds {
+		t.Errorf("ExpiresAt = %d, want cap %d", added.ExpiresAt, testNow.Unix()+MaxTTLSeconds)
+	}
+	got, err := s.GetWatch(testCtx, "capped")
+	if err != nil {
+		t.Fatalf("GetWatch: %v", err)
+	}
+	if got.ExpiresAt != added.ExpiresAt {
+		t.Errorf("stored ExpiresAt = %d, want %d", got.ExpiresAt, added.ExpiresAt)
+	}
+}
+
+// TestOnceRoundTrip: Once *bool round-trips through every read path;
+// nil stores as true, an explicit false stays false.
+func TestOnceRoundTrip(t *testing.T) {
+	s := openTestStore(t)
+	f := false
+	if _, err := s.AddWatch(testCtx, Watch{ID: "once-nil", RoomID: "r", Kind: watch.KindEdge, ReplyTo: "m1"}, 100, testNow); err != nil {
+		t.Fatalf("AddWatch once-nil: %v", err)
+	}
+	if _, err := s.AddWatch(testCtx, Watch{ID: "once-false", RoomID: "r", Kind: watch.KindEdge, ReplyTo: "m2", Once: &f}, 100, testNow); err != nil {
+		t.Fatalf("AddWatch once-false: %v", err)
+	}
+
+	check := func(name string, w Watch) {
+		t.Helper()
+		if w.Once == nil {
+			t.Errorf("%s Once = nil, want non-nil", name)
+			return
+		}
+		want := w.ID == "once-nil"
+		if *w.Once != want {
+			t.Errorf("%s Once = %v, want %v", name, *w.Once, want)
+		}
+	}
+
+	got, err := s.GetWatch(testCtx, "once-nil")
+	if err != nil {
+		t.Fatalf("GetWatch once-nil: %v", err)
+	}
+	check("GetWatch once-nil", got)
+	got, err = s.GetWatch(testCtx, "once-false")
+	if err != nil {
+		t.Fatalf("GetWatch once-false: %v", err)
+	}
+	check("GetWatch once-false", got)
+
+	list, err := s.ListWatches(testCtx)
+	if err != nil {
+		t.Fatalf("ListWatches: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("ListWatches len = %d, want 2", len(list))
+	}
+	for _, w := range list {
+		check("ListWatches "+w.ID, w)
+	}
+
+	due, err := s.DueWatches(testCtx, testNow.Add(100*time.Second))
+	if err != nil {
+		t.Fatalf("DueWatches: %v", err)
+	}
+	if len(due) != 2 {
+		t.Fatalf("DueWatches len = %d, want 2", len(due))
+	}
+	for _, w := range due {
+		check("DueWatches "+w.ID, w)
 	}
 }

@@ -27,10 +27,13 @@ type Store struct {
 
 // Open opens (creating if needed) the SQLite database at path, runs the
 // schema migrations, and enables WAL mode and foreign keys on every
-// connection.
+// connection. The default parameters are merged into any query string
+// the path already carries.
 func Open(path string) (*Store, error) {
 	dsn := path
-	if !strings.Contains(path, "?") {
+	if strings.Contains(path, "?") {
+		dsn = path + "&_foreign_keys=on&_journal_mode=WAL"
+	} else {
 		dsn = path + "?_foreign_keys=on&_journal_mode=WAL"
 	}
 	db, err := sql.Open("sqlite", dsn)

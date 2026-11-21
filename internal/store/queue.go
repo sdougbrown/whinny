@@ -14,9 +14,9 @@ type Wake struct {
 	CreatedAt int64 // unix seconds
 }
 
-// EnqueueWake appends a wake to agent's queue. If w.CreatedAt is zero it is
-// set from now. On success w.ID is set to the new row id.
-func (s *Store) EnqueueWake(ctx context.Context, w Wake, now time.Time) error {
+// EnqueueWake appends a wake to agent's queue. If w.CreatedAt is zero
+// it is set from now. It returns the new row's id.
+func (s *Store) EnqueueWake(ctx context.Context, w Wake, now time.Time) (int64, error) {
 	if w.CreatedAt == 0 {
 		w.CreatedAt = now.Unix()
 	}
@@ -26,10 +26,9 @@ func (s *Store) EnqueueWake(ctx context.Context, w Wake, now time.Time) error {
 		`INSERT INTO wake_queue (agent, payload, created_at) VALUES (?, ?, ?)`,
 		w.Agent, w.Payload, w.CreatedAt)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	w.ID, err = res.LastInsertId()
-	return err
+	return res.LastInsertId()
 }
 
 // DequeueWakes fetches and deletes all queued wakes for agent, in FIFO

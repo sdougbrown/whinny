@@ -9,15 +9,12 @@ import (
 	"fmt"
 	"regexp"
 	"time"
+
+	"github.com/sdougbrown/whinny/internal/watch"
 )
 
-// Watch kinds.
-const (
-	WatchKindEdge         = "edge"
-	WatchKindPattern      = "pattern"
-	WatchKindThread       = "thread"
-	WatchKindSubscription = "subscription"
-)
+// Watch is the canonical watch row, shared with the wake package.
+type Watch = watch.Watch
 
 // TTL bounds, in seconds.
 const (
@@ -27,57 +24,49 @@ const (
 	MaxTTLSeconds = 604800
 )
 
-// Sentinel errors for watch validation at the store boundary.
-var (
-	// ErrInvalidKind is returned when the watch kind is not one of the
-	// known kinds.
-	ErrInvalidKind = errors.New("store: invalid watch kind")
-	// ErrInvalidTTL is returned when ttl_s is not in (0, MaxTTLSeconds].
-	ErrInvalidTTL = errors.New("store: invalid ttl_s")
-	// ErrInvalidPattern is returned when the pattern does not compile as a
-	// Go regexp.
-	ErrInvalidPattern = errors.New("store: invalid pattern")
-)
+// ErrInvalidWatch is returned by Validate and AddWatch when the watch is
+// not well-formed; the error carries a detail naming the problem.
+var ErrInvalidWatch = errors.New("store: invalid watch")
 
-// Watch is one row of the watches table.
-type Watch struct {
-	ID        string
-	RoomID    string
-	Owner     string
-	Kind      string
-	FromUser  string
-	Pattern   string
-	ThreadID  string
-	ReplyTo   string
-	Note      string
-	Once      bool
-	TTLS      int
-	CreatedAt int64 // unix seconds
-	ExpiresAt int64 // unix seconds
-}
-
-// Validate checks the watch's kind, TTL, and pattern.
-func (w Watch) Validate() error {
+// Validate checks the watch's room, kind, and kind-specific fields:
+// edge requires ReplyTo, pattern requires a non-empty compiling
+// Pattern, thread and subscription require ThreadID.
+func Validate(w Watch) error {
+	if w.RoomID == "" {
+		return fmt.Errorf("%w: room_id required", ErrInvalidWatch)
+	}
 	switch w.Kind {
-	case WatchKindEdge, WatchKindPattern, WatchKindThread, WatchKindSubscription:
+	case watch.KindEdge:
+		if w.ReplyTo == "" {
+			return fmt.Errorf("%w: edge requires reply_to", ErrInvalidWatch)
+		}
+	case watch.KindPattern:
+		if w.Pattern == "" {
+			return fmt.Errorf("%w: pattern requires a non-empty pattern", ErrInvalidWatch)
+		}
+		if _, err := regexp.Compile(w.Pattern); err != nil {
+			return fmt.Errorf("%w: pattern does not compile: %v", ErrInvalidWatch, err)
+		}
+	case watch.KindThread, watch.KindSubscription:
+		if w.ThreadID == "" {
+			return fmt.Errorf("%w: %s requires thread_id", ErrInvalidWatch, w.Kind)
+		}
 	default:
-		return fmt.Errorf("%w: %q", ErrInvalidKind, w.Kind)
-	}
-	if w.TTLS <= 0 || w.TTLS > MaxTTLSeconds {
-		return fmt.Errorf("%w: %d", ErrInvalidTTL, w.TTLS)
-	}
-	if _, err := regexp.Compile(w.Pattern); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidPattern, err)
+		return fmt.Errorf("%w: unknown kind %q", ErrInvalidWatch, w.Kind)
 	}
 	return nil
 }
 
-// AddWatch inserts a watch, validating it at the boundary. If w.ID is empty
-// a daemon-generated id (crypto/rand hex) is assigned; if w.CreatedAt is
-// zero it is set from now. ExpiresAt is always derived as CreatedAt + TTLS.
-// The stored watch is returned.
-func (s *Store) AddWatch(ctx context.Context, w Watch, now time.Time) (Watch, error) {
-	if err := w.Validate(); err != nil {
+// AddWatch inserts a watch, validating it at the boundary. If w.ID is
+// empty a daemon-generated id (crypto/rand hex) is assigned; if
+// w.CreatedAt is zero it is set from now. ExpiresAt is CreatedAt + ttl,
+// capped at now + MaxTTLSeconds: a future CreatedAt is honored but never
+// yields an expiry beyond the cap. The stored watch is returned.
+func (s *Store) AddWatch(ctx context.Context, w Watch, ttl int, now time.Time) (Watch, error) {
+	if ttl <= 0 {
+		return Watch{}, fmt.Errorf("%w: ttl_s must be > 0", ErrInvalidWatch)
+	}
+	if err := Validate(w); err != nil {
 		return Watch{}, err
 	}
 	if w.ID == "" {
@@ -93,31 +82,35 @@ func (s *Store) AddWatch(ctx context.Context, w Watch, now time.Time) (Watch, er
 	if w.Owner == "" {
 		w.Owner = "resident"
 	}
-	w.ExpiresAt = w.CreatedAt + int64(w.TTLS)
+	w.ExpiresAt = w.CreatedAt + int64(ttl)
+	if cap := now.Unix() + MaxTTLSeconds; w.ExpiresAt > cap {
+		w.ExpiresAt = cap
+	}
+	once := 0
+	if w.Once == nil || *w.Once {
+		once = 1
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO watches (id, room_id, owner, kind, from_user, pattern, thread_id, reply_to, note, once, ttl_s, created_at, expires_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		w.ID, w.RoomID, w.Owner, w.Kind, w.FromUser, w.Pattern, w.ThreadID, w.ReplyTo, w.Note, w.Once, w.TTLS, w.CreatedAt, w.ExpiresAt)
+		w.ID, w.RoomID, w.Owner, w.Kind, w.FromUser, w.Pattern, w.ThreadID, w.ReplyTo, w.Note, once, ttl, w.CreatedAt, w.ExpiresAt)
 	return w, err
 }
 
 // GetWatch returns the watch with id, or ErrNotFound.
 func (s *Store) GetWatch(ctx context.Context, id string) (Watch, error) {
-	var w Watch
-	var once int
-	err := s.db.QueryRowContext(ctx,
+	row := s.db.QueryRowContext(ctx,
 		`SELECT id, room_id, owner, kind, from_user, pattern, thread_id, reply_to, note, once, ttl_s, created_at, expires_at
-		 FROM watches WHERE id = ?`, id).
-		Scan(&w.ID, &w.RoomID, &w.Owner, &w.Kind, &w.FromUser, &w.Pattern, &w.ThreadID, &w.ReplyTo, &w.Note, &once, &w.TTLS, &w.CreatedAt, &w.ExpiresAt)
+		 FROM watches WHERE id = ?`, id)
+	w, err := scanWatch(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Watch{}, ErrNotFound
 	}
 	if err != nil {
 		return Watch{}, err
 	}
-	w.Once = once == 1
 	return w, nil
 }
 
@@ -174,13 +167,16 @@ type scanner interface {
 	Scan(dest ...any) error
 }
 
+// scanWatch reads one row. The ttl_s column is read but not retained:
+// the shared Watch type carries no TTL field.
 func scanWatch(row scanner) (Watch, error) {
 	var w Watch
-	var once int
-	err := row.Scan(&w.ID, &w.RoomID, &w.Owner, &w.Kind, &w.FromUser, &w.Pattern, &w.ThreadID, &w.ReplyTo, &w.Note, &once, &w.TTLS, &w.CreatedAt, &w.ExpiresAt)
+	var once, ttl int
+	err := row.Scan(&w.ID, &w.RoomID, &w.Owner, &w.Kind, &w.FromUser, &w.Pattern, &w.ThreadID, &w.ReplyTo, &w.Note, &once, &ttl, &w.CreatedAt, &w.ExpiresAt)
 	if err != nil {
 		return Watch{}, err
 	}
-	w.Once = once == 1
+	b := once == 1
+	w.Once = &b
 	return w, nil
 }
