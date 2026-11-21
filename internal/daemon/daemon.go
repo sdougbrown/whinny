@@ -246,6 +246,17 @@ func (d *daemon) handleRecord(ctx context.Context, rec apronws.Record, subscribe
 		return
 	}
 	m := rec.Message
+	// Dedupe against the room cursor: a replayed message (catch-up) or a
+	// duplicate push at or below the cursor is already evaluated. The
+	// SetCursor max-upsert below advances the dedup line for both the
+	// live loop and the catch-up goroutine. LogID is a global sequence,
+	// so one per-room cursor suffices.
+	cursor, err := d.store.GetCursor(ctx, m.RoomID)
+	if err != nil {
+		log.Printf("daemon: get cursor %s: %v", m.RoomID, err)
+	} else if int64(m.LogID) <= cursor {
+		return
+	}
 	// Feed the reply-author cache as records stream past, so a later
 	// reply to this message resolves without a History call. The author
 	// is known even for a delete tombstone.

@@ -48,6 +48,13 @@ type fakeServer struct {
 	// historyByRoom is the history response's messages, keyed by room
 	// id; a missing room yields an empty list.
 	historyByRoom map[string][]map[string]any
+	// historyGate, when non-nil, blocks the history response until it
+	// is closed: a test holds the replay to simulate a live push
+	// landing between the reconnect and the history response.
+	historyGate chan struct{}
+	// historyGateHit, when non-nil, is signaled (non-blocking) when a
+	// history request reaches the gate.
+	historyGateHit chan struct{}
 }
 
 func newFakeServer(t *testing.T) *fakeServer {
@@ -132,7 +139,15 @@ func (f *fakeServer) run(fc *serverConn) {
 			_ = json.Unmarshal(fr.Params, &p)
 			f.mu.Lock()
 			msgs := f.historyByRoom[p.RoomID]
+			gate := f.historyGate
 			f.mu.Unlock()
+			if gate != nil {
+				select {
+				case f.historyGateHit <- struct{}{}:
+				default:
+				}
+				<-gate
+			}
 			if msgs == nil {
 				msgs = []map[string]any{}
 			}
@@ -1067,6 +1082,126 @@ func TestCatchUpOnReconnect(t *testing.T) {
 	if !strings.Contains(d.env.Text, "kind=mention") {
 		t.Errorf("reconnect catch-up envelope = %q, want a mention wake", d.env.Text)
 	}
+	h.stop(t)
+}
+
+// --- cursor dedupe (handleRecord skips LogID <= cursor) ---
+
+func TestDedupeSkipsLiveMessageAtCursor(t *testing.T) {
+	cfg := baseCfg()
+	h := startHarness(t, cfg)
+
+	// Pre-seed the cursor at the message's log id: the live push is a
+	// duplicate and must not wake.
+	if err := h.st.SetCursor(context.Background(), "r1", 5); err != nil {
+		t.Fatalf("set cursor: %v", err)
+	}
+	h.fc.pushMessageAt("m5", "r1", "doug", "squire can you look", []string{"u9"}, 5)
+	waitSettled(t, h, 0, "live message at the cursor must not wake")
+	h.stop(t)
+}
+
+func TestCatchUpDedupesReplayedMessages(t *testing.T) {
+	cfg := baseCfg()
+	h := startHarnessWithSetup(t, cfg, func(h *harness) {
+		// Pre-seed the cursor: the daemon was "down" since log 5.
+		if err := h.st.SetCursor(context.Background(), "r1", 5); err != nil {
+			t.Fatalf("set cursor: %v", err)
+		}
+		// The history returns older (log 3, 5) and newer (log 6) messages;
+		// only the newer one is evaluated.
+		h.srv.setCatchUp(
+			[]map[string]any{{"room_id": "r1"}},
+			map[string][]map[string]any{
+				"r1": {
+					{
+						"message_id": "m3", "log_id": 3, "room_id": "r1",
+						"from": map[string]any{"user_id": "doug", "name": "doug"},
+						"body": map[string]any{"text": "old noise"},
+					},
+					{
+						"message_id": "m5", "log_id": 5, "room_id": "r1",
+						"from": map[string]any{"user_id": "doug", "name": "doug"},
+						"body": map[string]any{"text": "at-cursor noise"},
+					},
+					{
+						"message_id": "m6", "log_id": 6, "room_id": "r1",
+						"from":     map[string]any{"user_id": "doug", "name": "doug"},
+						"body":     map[string]any{"text": "squire can you look"},
+						"mentions": []string{"u9"},
+					},
+				},
+			},
+		)
+	})
+
+	// Exactly one wake: only the newer-than-cursor message.
+	d := h.dlv.wait(t)
+	if !strings.Contains(d.env.Text, "kind=mention") {
+		t.Errorf("catch-up envelope = %q, want the mention wake", d.env.Text)
+	}
+	waitSettled(t, h, 1, "only newer-than-cursor messages evaluated")
+	h.stop(t)
+}
+
+func TestReplayAndLiveOverlapDeliversOnce(t *testing.T) {
+	cfg := baseCfg()
+	h := startHarness(t, cfg)
+
+	// Pre-seed the cursor and hold the history response: the live push
+	// lands between the reconnect and the replay.
+	if err := h.st.SetCursor(context.Background(), "r1", 5); err != nil {
+		t.Fatalf("set cursor: %v", err)
+	}
+	h.srv.historyGate = make(chan struct{})
+	h.srv.historyGateHit = make(chan struct{}, 1)
+	var gateOnce sync.Once
+	closeGate := func() { gateOnce.Do(func() { close(h.srv.historyGate) }) }
+	t.Cleanup(closeGate)
+	h.srv.setCatchUp(
+		[]map[string]any{{"room_id": "r1"}},
+		map[string][]map[string]any{
+			"r1": {{
+				"message_id": "m6", "log_id": 6, "room_id": "r1",
+				"from":     map[string]any{"user_id": "doug", "name": "doug"},
+				"body":     map[string]any{"text": "squire can you look"},
+				"mentions": []string{"u9"},
+			}},
+		},
+	)
+
+	// Force a reconnect: the catch-up goroutine blocks on the history
+	// response.
+	fc1 := h.srv.connAt(t, 1)
+	fc1.conn.CloseNow()
+	select {
+	case <-fc1.closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for connection close")
+	}
+	fc2 := h.srv.connAt(t, 2)
+	errC := make(chan error, 1)
+	go func() { errC <- fc2.handshake() }()
+	if err := <-errC; err != nil {
+		t.Fatalf("server handshake: %v", err)
+	}
+	h.fc = fc2
+
+	// The live push of the same message (log 6) is evaluated and
+	// advances the cursor.
+	fc2.pushMessageAt("m6", "r1", "doug", "squire can you look", []string{"u9"}, 6)
+	waitCursor(t, h, 6)
+
+	// Wait for the catch-up to reach the history fetch (the replay
+	// path is live), then release it: the catch-up's copy of m6 is at
+	// the cursor and is skipped.
+	select {
+	case <-h.srv.historyGateHit:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for the catch-up history fetch")
+	}
+	closeGate()
+	waitSettled(t, h, 1, "replay + live overlap delivers once")
 	h.stop(t)
 }
 
