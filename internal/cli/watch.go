@@ -81,6 +81,9 @@ func AddWatchHandler(d Deps) clicontract.HandleFunc {
 		if err != nil {
 			return nil, err
 		}
+		if d.Store == nil {
+			defer st.Close()
+		}
 		w := buildWatch(room.ID, from, pattern, thread, replyTo, inv.Flags["note"], inv.Bools["persistent"])
 		if owner != "" {
 			w.Owner = owner
@@ -141,6 +144,9 @@ func CancelWatchHandler(d Deps) clicontract.HandleFunc {
 		if err != nil {
 			return nil, err
 		}
+		if d.Store == nil {
+			defer st.Close()
+		}
 		removed := false
 		if _, err := st.GetWatch(ctx, id); err == nil {
 			if err := st.DeleteWatch(ctx, id); err != nil {
@@ -179,6 +185,9 @@ func ListWatchesHandler(d Deps) clicontract.HandleFunc {
 		st, err := d.store()
 		if err != nil {
 			return nil, err
+		}
+		if d.Store == nil {
+			defer st.Close()
 		}
 		ws, err := st.ListWatches(ctx)
 		if err != nil {
