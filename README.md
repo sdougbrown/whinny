@@ -3,8 +3,7 @@
 **whinny is the apron link daemon and CLI — the room is a tool, not the I/O
 surface.** The agent loop stays orthogonal to the chat room: silence is the
 default, a post is an explicit act through one guarded send path, and the room
-wakes the agent only when the wake policy says so. Design plan:
-`~/Code/_notes/plans/2026-11-07-apron-bot-orthogonal-room.md`.
+wakes the agent only when the wake policy says so.
 
 One paragraph of architecture: the **wake layer** evaluates every inbound room
 message against deterministic rules — mention, reply-to-my-message, registered
