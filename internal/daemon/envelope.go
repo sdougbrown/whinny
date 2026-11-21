@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/sdougbrown/whinny/internal/wake"
@@ -64,7 +65,9 @@ func ExpiryEnvelope(w watch.Watch) Envelope {
 // quoteHeader renders one header value. Values made only of header-safe
 // characters go out bare; anything else (spaces, quotes, empties) is
 // double-quoted with escapes, so a note like `umpire posted "v2"` stays
-// one parseable field.
+// one parseable field. Control characters are escaped (\n, \r, \t, and
+// any other byte < 0x20 or 0x7f as \xHH) so a note with a newline can
+// never split the single-line wake header.
 func quoteHeader(s string) string {
 	if s != "" && strings.IndexFunc(s, func(r rune) bool {
 		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
@@ -76,10 +79,23 @@ func quoteHeader(s string) string {
 	b.WriteByte('"')
 	for _, r := range s {
 		switch r {
-		case '"', '\\':
-			b.WriteByte('\\')
+		case '"':
+			b.WriteString(`\"`)
+		case '\\':
+			b.WriteString(`\\`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			if r < 0x20 || r == 0x7f {
+				b.WriteString(fmt.Sprintf(`\x%02x`, r))
+			} else {
+				b.WriteRune(r)
+			}
 		}
-		b.WriteRune(r)
 	}
 	b.WriteByte('"')
 	return b.String()
