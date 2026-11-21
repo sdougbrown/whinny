@@ -55,9 +55,9 @@ func TestDecodePush(t *testing.T) {
 		{
 			// A tombstone at the same log_id as the message above: body and
 			// ext are dropped, and the tombstone wins.
-			name:   "tombstone at equal log_id",
-			method: "message",
-			data:   `{"message_id":"m1","log_id":5,"room_id":"r1","from":{"user_id":"u1","name":"Ann"},"deleted":true}`,
+			name:     "tombstone at equal log_id",
+			method:   "message",
+			data:     `{"message_id":"m1","log_id":5,"room_id":"r1","from":{"user_id":"u1","name":"Ann"},"deleted":true}`,
 			wantKind: KindMessage,
 			wantOK:   true,
 			check: func(t *testing.T, rec Record) {

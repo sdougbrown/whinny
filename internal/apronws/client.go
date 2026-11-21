@@ -43,9 +43,9 @@ type Client struct {
 	// read loop; keep it short and non-blocking.
 	OnReconnect func()
 
-	mu      sync.Mutex
-	live    *live
-	authed  bool
+	mu     sync.Mutex
+	live   *live
+	authed bool
 	// token is the server-issued token from the last auth; it is preferred
 	// over opts.Token on (re)auth. Empty until the first auth succeeds.
 	token   string
@@ -170,7 +170,7 @@ type PostParams struct {
 // PostResult is the "message" request's result. Raw carries the full
 // result object.
 type PostResult struct {
-	MessageID string          `json:"message_id"`
+	MessageID string `json:"message_id"`
 	Raw       json.RawMessage
 }
 
@@ -235,8 +235,8 @@ type Room struct {
 // RoomListResult is the "room_list" request's result. Raw carries the full
 // result object.
 type RoomListResult struct {
-	Joined    []Room          `json:"joined"`
-	NotJoined []Room          `json:"not_joined,omitempty"`
+	Joined    []Room `json:"joined"`
+	NotJoined []Room `json:"not_joined,omitempty"`
 	Raw       json.RawMessage
 }
 

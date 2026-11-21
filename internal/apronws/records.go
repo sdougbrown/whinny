@@ -38,10 +38,10 @@ type ServerInfo struct {
 
 func decodeServerInfo(data []byte) (ServerInfo, error) {
 	var raw struct {
-		Apron        int     `json:"apron"`
-		Agent        string  `json:"agent"`
+		Apron        int      `json:"apron"`
+		Agent        string   `json:"agent"`
 		Capabilities []string `json:"capabilities"`
-		Ping         float64 `json:"ping"`
+		Ping         float64  `json:"ping"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return ServerInfo{}, err
@@ -60,11 +60,11 @@ func decodeServerInfo(data []byte) (ServerInfo, error) {
 // Message is an inbound chat message push. A delete tombstone drops Body
 // and Ext; at equal LogID a tombstone wins over the message it replaces.
 type Message struct {
-	MessageID string    `json:"message_id"`
-	LogID     int64     `json:"log_id"`
-	PrevLogID *int64    `json:"prev_log_id"`
-	RoomID    string    `json:"room_id"`
-	From      From      `json:"from"`
+	MessageID string `json:"message_id"`
+	LogID     int64  `json:"log_id"`
+	PrevLogID *int64 `json:"prev_log_id"`
+	RoomID    string `json:"room_id"`
+	From      From   `json:"from"`
 	// Body is nil for a delete tombstone.
 	Body *Body `json:"body"`
 	// ReplyTo, when present, links the message to the one it replies to.
