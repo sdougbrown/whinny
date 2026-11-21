@@ -91,15 +91,18 @@ func AddWatchHandler(d Deps) clicontract.HandleFunc {
 		w := buildWatch(room.ID, from, pattern, thread, replyTo, inv.Flags["note"], inv.Bools["persistent"])
 		if owner != "" {
 			w.Owner = owner
+			// Write the delivery callback BEFORE the watch: a stale
+			// callback without a watch is harmless (and overwritten on
+			// retry), but a watch without its callback would be an
+			// orphan the shared daemon silently skips, and a retry would
+			// insert a second watch.
+			if err := st.SetMeta(ctx, daemon.MetaDeliveryPrefix+owner, onFire); err != nil {
+				return nil, OperationalErrorf("set delivery callback: %v", err)
+			}
 		}
 		stored, err := st.AddWatch(ctx, w, int(ttl/time.Second), d.now())
 		if err != nil {
 			return nil, OperationalErrorf("add watch: %v", err)
-		}
-		if owner != "" {
-			if err := st.SetMeta(ctx, daemon.MetaDeliveryPrefix+owner, onFire); err != nil {
-				return nil, OperationalErrorf("set delivery callback: %v", err)
-			}
 		}
 		return stored.ID, nil
 	}
