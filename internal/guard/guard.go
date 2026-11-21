@@ -40,6 +40,9 @@ type Denial struct {
 type GuardInput struct {
 	// BreakerLatched is the persisted breaker state.
 	BreakerLatched bool
+	// BreakerReason is the persisted breaker reason; when the breaker is
+	// latched it is included in the refusal text.
+	BreakerReason string
 	// Bucket, when non-nil, overrides the chain's default bucket for
 	// this evaluation.
 	Bucket *RateBucket
@@ -51,67 +54,75 @@ type GuardInput struct {
 }
 
 // Chain evaluates guards in fixed order (breaker, rate-limit, quiet); the
-// first denial wins. The chain owns the default rate bucket built from the
+// first denial wins. Evaluate decides without side effects and consumes a
+// bucket token only when the send is allowed, so a denial never drains
+// the bucket. The chain owns the default rate bucket built from the
 // config, so bucket state persists across Evaluate calls.
 type Chain struct {
 	bucket *RateBucket
-	guards []guard
-}
-
-type guard struct {
-	name  string
-	check func(c *Chain, in GuardInput) (Denial, bool)
 }
 
 // NewChain builds the guard chain from cfg.
 func NewChain(cfg Config) *Chain {
-	return &Chain{
-		bucket: NewRateBucket(cfg),
-		guards: []guard{
-			{name: "breaker", check: checkBreaker},
-			{name: "rate-limit", check: checkRateLimit},
-			{name: "quiet", check: checkQuiet},
-		},
-	}
+	return &Chain{bucket: NewRateBucket(cfg)}
 }
 
-// Evaluate runs the guards in order and returns the first denial, if any.
+// Evaluate runs the guards in precedence order (breaker, rate-limit,
+// quiet) without side effects and returns the first denial, if any. When
+// the send is allowed it consumes one bucket token.
 func (c *Chain) Evaluate(in GuardInput) (Denial, bool) {
-	for _, g := range c.guards {
-		if d, denied := g.check(c, in); denied {
-			return d, true
-		}
+	if d, denied := checkBreaker(in); denied {
+		return d, true
+	}
+	if d, denied := checkRateLimit(c, in); denied {
+		return d, true
+	}
+	if d, denied := checkQuiet(in); denied {
+		return d, true
+	}
+	b := c.bucket
+	if in.Bucket != nil {
+		b = in.Bucket
+	}
+	if b != nil && b.cap > 0 {
+		b.Take(in.Now)
 	}
 	return Denial{}, false
 }
 
-func checkBreaker(_ *Chain, in GuardInput) (Denial, bool) {
+func checkBreaker(in GuardInput) (Denial, bool) {
 	if !in.BreakerLatched {
 		return Denial{}, false
 	}
-	return Denial{Kind: KindRefusedBreaker, Text: "latched, do not retry"}, true
+	text := "latched, do not retry"
+	if in.BreakerReason != "" {
+		text = fmt.Sprintf("latched (%s), do not retry", in.BreakerReason)
+	}
+	return Denial{Kind: KindRefusedBreaker, Text: text}, true
 }
 
+// checkRateLimit reports a denial when the bucket cannot serve a token
+// now. It does not consume: a zero-capacity bucket (PerMinute <= 0)
+// fails closed, and an empty bucket is already out of tokens.
 func checkRateLimit(c *Chain, in GuardInput) (Denial, bool) {
 	b := c.bucket
 	if in.Bucket != nil {
 		b = in.Bucket
 	}
-	if b == nil || b.cap == 0 {
-		return Denial{}, false
+	if b == nil || b.cap <= 0 {
+		return Denial{Kind: KindRefusedRateLimit, Text: "rate limit: no tokens available"}, true
 	}
-	ok, wait := b.Take(in.Now)
-	if ok {
-		return Denial{}, false
+	if ok, wait := b.CanServe(in.Now); !ok {
+		return Denial{
+			Kind:       KindRefusedRateLimit,
+			RetryAfter: wait,
+			Text:       fmt.Sprintf("retry is safe after %s", wait),
+		}, true
 	}
-	return Denial{
-		Kind:       KindRefusedRateLimit,
-		RetryAfter: wait,
-		Text:       fmt.Sprintf("retry is safe after %s", wait),
-	}, true
+	return Denial{}, false
 }
 
-func checkQuiet(_ *Chain, in GuardInput) (Denial, bool) {
+func checkQuiet(in GuardInput) (Denial, bool) {
 	if in.QuietUntil == 0 || in.Now.Unix() >= in.QuietUntil {
 		return Denial{}, false
 	}
@@ -119,7 +130,7 @@ func checkQuiet(_ *Chain, in GuardInput) (Denial, bool) {
 }
 
 // RateBucket is a token bucket: capacity = per-minute rate, refilled at one
-// token per 60s/rate. Time is injected via Take.
+// token per 60s/rate. Time is injected via Take and CanServe.
 type RateBucket struct {
 	mu     sync.Mutex
 	tokens float64
@@ -141,14 +152,41 @@ func NewRateBucket(cfg Config) *RateBucket {
 	}
 }
 
+// CanServe reports whether a token is available at now without consuming
+// one. It refills first; the refill advances the bucket's clock but
+// never takes a token.
+func (b *RateBucket) CanServe(now time.Time) (bool, time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.cap <= 0 {
+		return false, 0
+	}
+	b.refillTo(now)
+	if b.tokens >= 1-1e-9 {
+		return true, 0
+	}
+	return false, time.Duration((1 - b.tokens) * b.refill.Seconds() * float64(time.Second))
+}
+
 // Take consumes one token at now, refilling first. It reports whether a
 // token was available and, if not, the wait until the next one.
 func (b *RateBucket) Take(now time.Time) (bool, time.Duration) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.cap == 0 {
+	if b.cap <= 0 {
 		return false, 0
 	}
+	b.refillTo(now)
+	if b.tokens >= 1-1e-9 {
+		b.tokens--
+		return true, 0
+	}
+	return false, time.Duration((1 - b.tokens) * b.refill.Seconds() * float64(time.Second))
+}
+
+// refillTo tops the bucket up for the time elapsed since the last
+// refill. The caller must hold b.mu.
+func (b *RateBucket) refillTo(now time.Time) {
 	if !b.last.IsZero() && now.After(b.last) {
 		b.tokens += now.Sub(b.last).Seconds() / b.refill.Seconds()
 		if b.tokens > b.cap {
@@ -156,9 +194,4 @@ func (b *RateBucket) Take(now time.Time) (bool, time.Duration) {
 		}
 	}
 	b.last = now
-	if b.tokens >= 1-1e-9 {
-		b.tokens--
-		return true, 0
-	}
-	return false, time.Duration((1 - b.tokens) * b.refill.Seconds() * float64(time.Second))
 }

@@ -36,9 +36,9 @@ func TestDenialKinds(t *testing.T) {
 	}{
 		{
 			name:  "breaker",
-			in:    GuardInput{BreakerLatched: true, Bucket: NewRateBucket(Config{PerMinute: 2}), Now: t0},
+			in:    GuardInput{BreakerLatched: true, BreakerReason: "server rate limit", Bucket: NewRateBucket(Config{PerMinute: 2}), Now: t0},
 			kind:  KindRefusedBreaker,
-			text:  "do not retry",
+			text:  "server rate limit",
 			retry: 0,
 		},
 		{
@@ -80,6 +80,53 @@ func TestAllowPath(t *testing.T) {
 	d, denied := chain.Evaluate(GuardInput{Bucket: NewRateBucket(Config{PerMinute: 2}), Now: t0})
 	if denied {
 		t.Fatalf("allow path denied: %+v", d)
+	}
+}
+
+// TestPerMinuteZeroFailsClosed: a non-positive PerMinute must deny every
+// send with refused-rate-limit; there is no allow path.
+func TestPerMinuteZeroFailsClosed(t *testing.T) {
+	for _, perMinute := range []int{0, -1} {
+		chain := NewChain(Config{PerMinute: perMinute})
+		d, denied := chain.Evaluate(GuardInput{Now: t0})
+		if !denied {
+			t.Fatalf("PerMinute %d: allow path, want denial", perMinute)
+		}
+		if d.Kind != KindRefusedRateLimit {
+			t.Errorf("PerMinute %d: Kind = %q, want %q", perMinute, d.Kind, KindRefusedRateLimit)
+		}
+	}
+}
+
+// TestQuietDenialDoesNotConsumeToken is the reproduced regression: a
+// quiet denial must not drain the bucket, so the first send after the
+// quiet period is allowed.
+func TestQuietDenialDoesNotConsumeToken(t *testing.T) {
+	chain := NewChain(Config{PerMinute: 1})
+	d, denied := chain.Evaluate(GuardInput{QuietUntil: t0.Unix() + 60, Now: t0})
+	if !denied || d.Kind != KindRefusedQuiet {
+		t.Fatalf("quiet Evaluate: (%+v, %v), want refused-quiet", d, denied)
+	}
+	d, denied = chain.Evaluate(GuardInput{Now: t0})
+	if denied {
+		t.Fatalf("unquiet send denied: %+v (bucket drained by the quiet denial)", d)
+	}
+}
+
+// TestChainOwnedBucket exercises the chain's default bucket: two sends
+// drain a PerMinute:2 bucket, the third is denied, and the refill admits
+// the next send 30s later.
+func TestChainOwnedBucket(t *testing.T) {
+	chain := NewChain(Config{PerMinute: 2})
+	for i, want := range []bool{false, false, true} {
+		d, denied := chain.Evaluate(GuardInput{Now: t0})
+		if denied != want {
+			t.Fatalf("Evaluate %d = denied %v, want %v (%+v)", i+1, denied, want, d)
+		}
+	}
+	d, denied := chain.Evaluate(GuardInput{Now: t0.Add(30 * time.Second)})
+	if denied {
+		t.Fatalf("Evaluate t0+30s denied: %+v", d)
 	}
 }
 
