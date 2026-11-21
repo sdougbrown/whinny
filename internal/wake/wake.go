@@ -197,13 +197,6 @@ func onceIDs(hits []WatchHit) []string {
 	return ids
 }
 
-// ExpiryDecision is the wake decision for a watch that expired without
-// matching. The caller obtains due watches from the store and delivers
-// these decisions.
-func ExpiryDecision(w watch.Watch) Decision {
-	return Decision{Wake: true, Kind: KindWatch, Reason: "no match within ttl: " + w.Note}
-}
-
 // mentioned reports whether the message mentions the bot, and returns the
 // matched name or alias for the reason.
 func mentioned(self Self, msg Msg) (string, bool) {

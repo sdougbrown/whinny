@@ -543,17 +543,6 @@ func TestOrderingMentionBeatsWatch(t *testing.T) {
 	}
 }
 
-func TestExpiryDecision(t *testing.T) {
-	w := watch.Watch{ID: "w1", Note: "deploy note"}
-	d := ExpiryDecision(w)
-	if !d.Wake || d.Kind != KindWatch {
-		t.Errorf("d = %+v, want wake watch", d)
-	}
-	if d.Reason != "no match within ttl: deploy note" {
-		t.Errorf("d.Reason = %q, want 'no match within ttl: deploy note'", d.Reason)
-	}
-}
-
 func TestAmbientGateValves(t *testing.T) {
 	t.Run("fresh gate allows", func(t *testing.T) {
 		g := NewAmbientGate(5*time.Minute, 10)
