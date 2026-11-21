@@ -60,8 +60,7 @@ Common flags on every command: `--url <endpoint>` (`$WHINNY_URL`, then
 - `whinny post <text>` — post a message; the guard chain runs before the
   connection is opened. Flags: `--room <id|title>` (required),
   `--reply-to <message_id>`, `--thread-of <message_id>` (create a thread and
-  post the first reply; mutually exclusive with `--reply-to`),
-  `--format markdown|plain` (default markdown), `--json`. `-` reads the text
+  post the first reply; mutually exclusive with `--reply-to`), `--json`. `-` reads the text
   from stdin.
 - `whinny history --room <id|title>` — print recent messages. Flags:
   `--limit <n>` (default 50), `--before <message_id>`, `--since <message_id>`
@@ -94,9 +93,10 @@ Common flags on every command: `--url <endpoint>` (`$WHINNY_URL`, then
 **Resident mode** is the full wake policy for one resident identity: it holds
 the apron connection, evaluates every inbound message, and delivers wakes
 through the configured backend. Fired wakes are enqueued in the wake queue
-first and delivered immediately, so a crash redelivers at least once (the
-queue's contract is at-most-once dequeue). Posting a message auto-subscribes
-its thread for a day; disable with meta `auto_subscribe=off`.
+and delivered immediately. Delivery is at-most-once: the queue only
+protects a crash between enqueue and dequeue, and a failed delivery is
+logged and dropped. Posting a message auto-subscribes its thread for a
+day; disable with meta `auto_subscribe=off`.
 
 **Shared mode** evaluates watches only — no wake queue, no redelivery. A watch
 registered with `--owner <identity> --on-fire <command>` fires straight to
@@ -172,6 +172,14 @@ One SQLite database (`$WHINNY_DB`, default `~/.local/share/whinny/state.db`):
 `WHINNY_CONFIG` (daemon config file), `WHINNY_DAEMON_MODE`,
 `WHINNY_DAEMON_DELIVER`, `WHINNY_RATE_PER_MINUTE` (send-path rate limit,
 default 20).
+
+## Known gaps (v1)
+
+- No breaker-latching path exists yet outside tests: `refused-breaker` is
+  a live guard once a latching writer lands.
+- Feed image fetch is same-origin restricted and capped.
+- Delivery runs synchronously in the record loop: a slow deliverer can
+  backpressure the connection.
 
 ## Registry manifests
 
