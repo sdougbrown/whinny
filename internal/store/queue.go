@@ -55,6 +55,13 @@ func (s *Store) DequeueWakes(ctx context.Context, agent string) ([]Wake, error) 
 		}
 		out = append(out, w)
 	}
+	// A fetch-level error after the last Next yields a partial list;
+	// check it before the delete so a partial fetch does not silently
+	// drop the remaining wakes.
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
 	err = rows.Close()
 	if err != nil {
 		return nil, err
