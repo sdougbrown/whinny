@@ -11,6 +11,7 @@ import (
 
 	"github.com/sdougbrown/cli-contract"
 	"github.com/sdougbrown/whinny/internal/apronws"
+	"github.com/sdougbrown/whinny/internal/daemon"
 	"github.com/sdougbrown/whinny/internal/store"
 	"github.com/sdougbrown/whinny/internal/watch"
 )
@@ -34,6 +35,14 @@ func AddWatchHandler(d Deps) clicontract.HandleFunc {
 		}
 		if inv.Bools["once"] && inv.Bools["persistent"] {
 			return nil, UsageErrorf("watch add: --once and --persistent are mutually exclusive")
+		}
+		owner := inv.Flags["owner"]
+		onFire := inv.Flags["on-fire"]
+		if owner == "" && onFire != "" {
+			return nil, UsageErrorf("watch add: --on-fire requires --owner")
+		}
+		if owner != "" && onFire == "" {
+			return nil, UsageErrorf("watch add: --owner requires --on-fire")
 		}
 		ttl := inv.Durations["ttl"]
 		if ttl == 0 {
@@ -70,9 +79,17 @@ func AddWatchHandler(d Deps) clicontract.HandleFunc {
 			return nil, err
 		}
 		w := buildWatch(room.ID, from, pattern, thread, replyTo, inv.Flags["note"], inv.Bools["persistent"])
-		stored, err := st.AddWatch(ctx, w, int(ttl/time.Second), time.Now())
+		if owner != "" {
+			w.Owner = owner
+		}
+		stored, err := st.AddWatch(ctx, w, int(ttl/time.Second), d.now())
 		if err != nil {
 			return nil, OperationalErrorf("add watch: %v", err)
+		}
+		if owner != "" {
+			if err := st.SetMeta(ctx, daemon.MetaDeliveryPrefix+owner, onFire); err != nil {
+				return nil, OperationalErrorf("set delivery callback: %v", err)
+			}
 		}
 		return stored.ID, nil
 	}

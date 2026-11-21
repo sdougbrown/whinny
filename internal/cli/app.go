@@ -161,6 +161,8 @@ func App(d Deps) *clicontract.App {
 							{Name: "once", Kind: clicontract.Bool, Usage: "watch fires once (default)"},
 							{Name: "persistent", Kind: clicontract.Bool, Usage: "watch stays until it expires or is cancelled"},
 							{Name: "ttl", Kind: clicontract.Duration, Default: 24 * time.Hour, Usage: "watch time to live (default 24h, cap 168h)"},
+							{Name: "owner", Kind: clicontract.String, Usage: "transient identity the watch belongs to (shared mode); requires --on-fire"},
+							{Name: "on-fire", Kind: clicontract.String, Usage: "delivery command the watch's hits fire (shared mode); requires --owner"},
 						},
 						Output: clicontract.Output{Mode: clicontract.OutputRaw, SuccessExitCodes: []int{0}},
 						Handle: AddWatchHandler(d),

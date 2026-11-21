@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/whinny/internal/apronws"
+	"github.com/sdougbrown/whinny/internal/daemon"
 	"github.com/sdougbrown/whinny/internal/store"
 	"github.com/sdougbrown/whinny/internal/watch"
 )
@@ -220,5 +221,85 @@ func TestWatchList(t *testing.T) {
 	jws, ok := res.([]watchJSON)
 	if !ok || len(jws) != 1 {
 		t.Fatalf("result = %v, want a 1-watch JSON array", res)
+	}
+}
+
+// TestWatchAddOwnerOnFire: --owner and --on-fire together set the
+// watch's Owner field and store the delivery callback under
+// "delivery:<owner>".
+func TestWatchAddOwnerOnFire(t *testing.T) {
+	d, s := watchDeps(t)
+	ctx := context.Background()
+	if _, err := AddWatchHandler(d)(ctx,
+		inv("watch add", nil, map[string]string{
+			"room":    "r1",
+			"pattern": "x",
+			"owner":   "agent-x",
+			"on-fire": "notify --room r1",
+		}, nil), io.Discard); err != nil {
+		t.Fatalf("AddWatchHandler: %v", err)
+	}
+	ws, err := s.ListWatches(ctx)
+	if err != nil {
+		t.Fatalf("ListWatches: %v", err)
+	}
+	if len(ws) != 1 {
+		t.Fatalf("watches = %d, want 1", len(ws))
+	}
+	if ws[0].Owner != "agent-x" {
+		t.Fatalf("Owner = %q, want agent-x", ws[0].Owner)
+	}
+	cmd, err := s.GetMeta(ctx, daemon.MetaDeliveryPrefix+"agent-x")
+	if err != nil {
+		t.Fatalf("GetMeta delivery: %v", err)
+	}
+	if cmd != "notify --room r1" {
+		t.Fatalf("delivery callback = %q, want the on-fire command", cmd)
+	}
+}
+
+// TestWatchAddOwnerOnFireValidation: --on-fire without --owner (and
+// --owner without --on-fire) are usage errors; the pair is required
+// together.
+func TestWatchAddOwnerOnFireValidation(t *testing.T) {
+	d, _ := watchDeps(t)
+	ctx := context.Background()
+	cases := []struct {
+		name  string
+		flags map[string]string
+		want  string
+	}{
+		{"on-fire without owner", map[string]string{"room": "r1", "pattern": "x", "on-fire": "cmd"}, "requires --owner"},
+		{"owner without on-fire", map[string]string{"room": "r1", "pattern": "x", "owner": "agent-x"}, "requires --on-fire"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := AddWatchHandler(d)(ctx, inv("watch add", nil, tc.flags, nil), io.Discard)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestWatchAddResidentDefaultOwner: a plain resident-mode watch add
+// (no --owner/--on-fire) keeps the Owner default 'resident' and stores
+// no delivery callback.
+func TestWatchAddResidentDefaultOwner(t *testing.T) {
+	d, s := watchDeps(t)
+	ctx := context.Background()
+	if _, err := AddWatchHandler(d)(ctx,
+		inv("watch add", nil, map[string]string{"room": "r1", "pattern": "x"}, nil), io.Discard); err != nil {
+		t.Fatalf("AddWatchHandler: %v", err)
+	}
+	ws, _ := s.ListWatches(ctx)
+	if len(ws) != 1 {
+		t.Fatalf("watches = %d, want 1", len(ws))
+	}
+	if ws[0].Owner != "resident" {
+		t.Fatalf("Owner = %q, want the resident default", ws[0].Owner)
+	}
+	if cmd, _ := s.GetMeta(ctx, daemon.MetaDeliveryPrefix+"resident"); cmd != "" {
+		t.Fatalf("delivery callback = %q, want none for a resident watch", cmd)
 	}
 }
