@@ -195,11 +195,8 @@ func NewStoreBucket(s *store.Store, perMinute int) *RateBucket {
 		if err != nil {
 			return err
 		}
-		tokens += 1
-		if tokens > float64(perMinute) {
-			tokens = float64(perMinute)
-		}
-		return s.SetRateState(context.Background(), tokens, last)
+		st := rate.Refund(rate.State{Tokens: tokens, Last: last}, perMinute)
+		return s.SetRateState(context.Background(), st.Tokens, st.Last)
 	}
 	return b
 }
@@ -269,8 +266,5 @@ func (b *RateBucket) Refund() {
 	if b.cap <= 0 {
 		return
 	}
-	b.tokens += 1
-	if b.tokens > b.cap {
-		b.tokens = b.cap
-	}
+	b.tokens = rate.Refund(rate.State{Tokens: b.tokens}, int(b.cap)).Tokens
 }

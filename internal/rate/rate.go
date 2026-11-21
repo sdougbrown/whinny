@@ -51,3 +51,15 @@ func Take(s State) State {
 	s.Tokens--
 	return s
 }
+
+// Refund returns one token to the state, capped at the capacity, so a
+// failed send (a take that never became a message) does not burn budget.
+// Best-effort by contract: cross-process refunds can over- or
+// under-count by one token under a race.
+func Refund(s State, perMinute int) State {
+	s.Tokens++
+	if s.Tokens > float64(perMinute) {
+		s.Tokens = float64(perMinute)
+	}
+	return s
+}
