@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -115,6 +116,14 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 		hist:   newHistoryCache(client),
 	}
 
+	// Reconnect catch-up: when the connection drops and reconnects, the
+	// messages missed in the gap are replayed from history (the cursor
+	// bounds the window). The hook runs in its own goroutine, off the
+	// client's read loop.
+	client.OnReconnect = func() {
+		d.catchUp(ctx)
+	}
+
 	// Drain stale queue entries for this agent before the loop: a wake
 	// enqueued before a crash fires now. The store's dequeue is
 	// at-most-once; that contract is accepted here.
@@ -126,6 +135,10 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 		}
 		return err
 	}
+
+	// Start catch-up: replay the messages missed while the daemon was
+	// down, before the live loop begins.
+	d.catchUp(ctx)
 
 	subscribe := d.autoSubscribe(ctx)
 	tick := newTicker(ExpirySweepInterval)
@@ -188,6 +201,44 @@ func (d *daemon) drain(ctx context.Context) error {
 	return nil
 }
 
+// catchUp replays the messages missed while the daemon was down (or
+// disconnected): for each joined room, it fetches the history since the
+// room's cursor, runs each message through the record handler
+// oldest-first, and lets the handler advance the cursor. Bounded to
+// catchUpLimit messages per room.
+const catchUpLimit = 200
+
+func (d *daemon) catchUp(ctx context.Context) {
+	rooms, err := d.client.RoomList(ctx, apronws.RoomListParams{})
+	if err != nil {
+		log.Printf("daemon: catch-up room list: %v", err)
+		return
+	}
+	subscribe := d.autoSubscribe(ctx)
+	for _, room := range rooms.Joined {
+		cursor, err := d.store.GetCursor(ctx, room.ID)
+		if err != nil {
+			log.Printf("daemon: catch-up cursor %s: %v", room.ID, err)
+			continue
+		}
+		res, err := d.client.History(ctx, apronws.HistoryParams{RoomID: room.ID, Limit: catchUpLimit})
+		if err != nil {
+			log.Printf("daemon: catch-up history %s: %v", room.ID, err)
+			continue
+		}
+		var msgs []*apronws.Message
+		for i := range res.Messages {
+			if int64(res.Messages[i].LogID) > cursor {
+				msgs = append(msgs, &res.Messages[i])
+			}
+		}
+		sort.Slice(msgs, func(i, j int) bool { return int64(msgs[i].LogID) < int64(msgs[j].LogID) })
+		for _, m := range msgs {
+			d.handleRecord(ctx, apronws.Record{Kind: apronws.KindMessage, Message: m}, subscribe)
+		}
+	}
+}
+
 // handleRecord processes one inbound push. Only message records carry
 // policy weight; room updates and activities are ignored.
 func (d *daemon) handleRecord(ctx context.Context, rec apronws.Record, subscribe bool) {
@@ -195,6 +246,10 @@ func (d *daemon) handleRecord(ctx context.Context, rec apronws.Record, subscribe
 		return
 	}
 	m := rec.Message
+	// Feed the reply-author cache as records stream past, so a later
+	// reply to this message resolves without a History call. The author
+	// is known even for a delete tombstone.
+	d.hist.feed(m.MessageID, m.RoomID, m.From.UserID)
 	if err := d.store.SetCursor(ctx, m.RoomID, int64(m.LogID)); err != nil {
 		log.Printf("daemon: set cursor %s: %v", m.RoomID, err)
 	}
@@ -240,12 +295,19 @@ func (d *daemon) subscribeOwnThread(ctx context.Context, m *apronws.Message) {
 // remove fired once-watches.
 func (d *daemon) handleResident(ctx context.Context, m *apronws.Message) {
 	msg := mapMsg(m)
+	watches := d.roomWatches(ctx, m.RoomID)
+	var resident []store.Watch
+	for _, w := range watches {
+		if d.ownsWatch(w.Owner) {
+			resident = append(resident, w)
+		}
+	}
 	dec := wake.Evaluate(ctx, wake.In{
 		Msg:        msg,
 		Self:       d.cfg.Self,
 		Peers:      d.cfg.Peers,
-		Watches:    d.roomWatches(ctx, m.RoomID),
-		History:    d.hist.lookup,
+		Watches:    resident,
+		History:    func(ctx context.Context, messageID string) (string, bool, error) { return d.hist.lookup(ctx, m.RoomID, messageID) },
 		Classifier: d.class,
 		Gate:       d.gate,
 		Clock:      d.clock,
@@ -335,8 +397,18 @@ func (d *daemon) ownerCommand(ctx context.Context, owner string) []string {
 	return SplitCommand(v)
 }
 
+// ownsWatch reports whether this resident daemon should act on a watch
+// with owner: 'resident' (the default) and the daemon's own agent are
+// kept; anything else belongs to a shared-mode transient with its own
+// callback and must not be consumed here.
+func (d *daemon) ownsWatch(owner string) bool {
+	return owner == "resident" || owner == d.cfg.Agent
+}
+
 // expireDue delivers expiry envelopes for every due watch and deletes
-// the watch: expiry is a wake the agent must see to re-arm.
+// the watch: expiry is a wake the agent must see to re-arm. In resident
+// mode the envelope routes through the durable queue under cfg.Agent
+// (matching the message path); foreign-owner watches are skipped.
 func (d *daemon) expireDue(ctx context.Context) {
 	due, err := d.store.DueWatches(ctx, d.now())
 	if err != nil {
@@ -344,6 +416,9 @@ func (d *daemon) expireDue(ctx context.Context) {
 		return
 	}
 	for _, w := range due {
+		if d.cfg.Mode == ModeResident && !d.ownsWatch(w.Owner) {
+			continue
+		}
 		env := ExpiryEnvelope(w)
 		if d.cfg.Mode == ModeShared {
 			if cmd := d.ownerCommand(ctx, w.Owner); len(cmd) > 0 {
@@ -352,9 +427,16 @@ func (d *daemon) expireDue(ctx context.Context) {
 				log.Printf("daemon: deliver expiry to %s: %v", w.Owner, err)
 			}
 		} else {
-			if err := d.dlv.Deliver(ctx, w.Owner, env); err != nil {
-				log.Printf("daemon: deliver expiry: %v", err)
+			payload, err := encodePayload(env)
+			if err != nil {
+				log.Printf("daemon: encode expiry: %v", err)
+				continue
 			}
+			if _, err := d.store.EnqueueWake(ctx, store.Wake{Agent: d.cfg.Agent, Payload: payload}, d.now()); err != nil {
+				log.Printf("daemon: enqueue expiry: %v", err)
+				continue
+			}
+			d.flushQueue(ctx)
 		}
 		if err := d.store.DeleteWatch(ctx, w.ID); err != nil {
 			log.Printf("daemon: delete expired watch %s: %v", w.ID, err)
@@ -362,20 +444,14 @@ func (d *daemon) expireDue(ctx context.Context) {
 	}
 }
 
-// roomWatches lists the store's watches filtered to one room.
+// roomWatches lists the store's unexpired watches for one room.
 func (d *daemon) roomWatches(ctx context.Context, roomID string) []store.Watch {
-	all, err := d.store.ListWatches(ctx)
+	ws, err := d.store.WatchesForRoom(ctx, roomID, d.now())
 	if err != nil {
-		log.Printf("daemon: list watches: %v", err)
+		log.Printf("daemon: list watches for %s: %v", roomID, err)
 		return nil
 	}
-	var out []store.Watch
-	for _, w := range all {
-		if w.RoomID == roomID {
-			out = append(out, w)
-		}
-	}
-	return out
+	return ws
 }
 
 // mapMsg projects an apronws message onto the policy's Msg: mentions and

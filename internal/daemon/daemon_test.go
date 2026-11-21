@@ -38,10 +38,16 @@ type serverConn struct {
 }
 
 type fakeServer struct {
-	ts    *httptest.Server
-	mu    sync.Mutex
-	conns []*serverConn
-	newC  chan struct{}
+	ts            *httptest.Server
+	mu            sync.Mutex
+	conns         []*serverConn
+	newC          chan struct{}
+	// joinedRooms is the room_list response's joined list; nil means
+	// none (the catch-up finds no rooms to replay).
+	joinedRooms []map[string]any
+	// historyByRoom is the history response's messages, keyed by room
+	// id; a missing room yields an empty list.
+	historyByRoom map[string][]map[string]any
 }
 
 func newFakeServer(t *testing.T) *fakeServer {
@@ -103,9 +109,35 @@ func (f *fakeServer) run(fc *serverConn) {
 			continue
 		}
 		var fr frame
-		if json.Unmarshal(data, &fr) == nil && fr.Method == "ping" {
+		if json.Unmarshal(data, &fr) != nil {
+			continue
+		}
+		switch fr.Method {
+		case "ping":
 			pong, _ := json.Marshal(map[string]any{"method": "pong"})
 			fc.write(pong)
+		case "room_list":
+			f.mu.Lock()
+			joined := f.joinedRooms
+			f.mu.Unlock()
+			if joined == nil {
+				joined = []map[string]any{}
+			}
+			reply, _ := json.Marshal(map[string]any{"id": fr.ID, "result": map[string]any{"joined": joined}})
+			fc.write(reply)
+		case "history":
+			var p struct {
+				RoomID string `json:"room_id"`
+			}
+			_ = json.Unmarshal(fr.Params, &p)
+			f.mu.Lock()
+			msgs := f.historyByRoom[p.RoomID]
+			f.mu.Unlock()
+			if msgs == nil {
+				msgs = []map[string]any{}
+			}
+			reply, _ := json.Marshal(map[string]any{"id": fr.ID, "result": map[string]any{"messages": msgs, "latest_log_id": "0"}})
+			fc.write(reply)
 		}
 		select {
 		case fc.recv <- data:
@@ -760,4 +792,268 @@ func TestRunValidatesConfig(t *testing.T) {
 	if err := Run(context.Background(), baseCfg(), Deps{Store: deps.Store}); err == nil {
 		t.Error("nil deliverer: Run = nil, want error")
 	}
+}
+
+// setCatchUp configures the fake server's room_list and history
+// responses for the catch-up.
+func (f *fakeServer) setCatchUp(rooms []map[string]any, historyByRoom map[string][]map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.joinedRooms = rooms
+	f.historyByRoom = historyByRoom
+}
+
+// startHarnessWithSetup is like startHarness but calls setup (to
+// configure the fake server) after the client connects and before Run
+// starts, so the startup catch-up sees the configured responses.
+func startHarnessWithSetup(t *testing.T, cfg Config, setup func(*harness)) *harness {
+	t.Helper()
+	h := &harness{
+		srv:    newFakeServer(t),
+		dlv:    newFakeDeliverer(),
+		clock:  newFakeClock(),
+		ticker: newTestTicker(),
+		done:   make(chan error, 1),
+	}
+	errC := make(chan error, 1)
+	go func() { errC <- h.srv.connAt(t, 1).handshake() }()
+	client, err := apronws.Connect(context.Background(), apronws.Options{URL: h.srv.ts.URL, Token: "test-token"})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	if err := <-errC; err != nil {
+		t.Fatalf("server handshake: %v", err)
+	}
+	h.fc = h.srv.connAt(t, 1)
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	h.st = st
+	t.Cleanup(func() { h.st.Close() })
+
+	if setup != nil {
+		setup(h)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	h.cancel = cancel
+	deps := Deps{
+		Client:  client,
+		Store:   h.st,
+		Deliver: h.dlv,
+		Clock:   h.clock,
+		Now:     h.clock.Now,
+		Ticker:  func(time.Duration) Ticker { return h.ticker },
+	}
+	go func() { h.done <- Run(ctx, cfg, deps) }()
+	t.Cleanup(h.cancel)
+	return h
+}
+
+// --- Fix 4: resident expiry routes through the queue under cfg.Agent ---
+
+func TestExpiryRoutesThroughQueueUnderAgent(t *testing.T) {
+	cfg := baseCfg() // Agent="squire"
+	h := startHarness(t, cfg)
+
+	// A watch owned by "resident" (the default) expires; the resident
+	// daemon (agent "squire") delivers the expiry under cfg.Agent.
+	bFalse := false
+	if _, err := h.st.AddWatch(context.Background(), store.Watch{
+		RoomID: "r1", Owner: "resident", Kind: "pattern",
+		Pattern: "deploy", Note: "waiting", Once: &bFalse,
+	}, 1, h.clock.Now()); err != nil {
+		t.Fatalf("add watch: %v", err)
+	}
+	h.clock.Advance(2 * time.Minute)
+	h.ticker.fire()
+	d := h.dlv.wait(t)
+	if d.agent != "squire" {
+		t.Errorf("agent = %q, want squire (cfg.Agent, not the watch owner)", d.agent)
+	}
+	if !strings.Contains(d.env.Text, "kind=watch-expired") {
+		t.Errorf("envelope = %q, want watch-expired", d.env.Text)
+	}
+	// The queue drained: the expiry was enqueued and delivered.
+	wakes, err := h.st.DequeueWakes(context.Background(), "squire")
+	if err != nil || len(wakes) != 0 {
+		t.Errorf("queued wakes after delivery = %v, err %v; want none", wakes, err)
+	}
+	h.stop(t)
+}
+
+// --- Fix 5: resident mode skips foreign-owner watches ---
+
+func TestResidentSkipsForeignOwnerWatch(t *testing.T) {
+	cfg := baseCfg() // Agent="squire"
+	h := startHarness(t, cfg)
+
+	// A watch owned by "alice" (a shared-mode transient) is in the
+	// store; the resident daemon must not consume it.
+	bTrue := true
+	if _, err := h.st.AddWatch(context.Background(), store.Watch{
+		RoomID: "r1", Owner: "alice", Kind: "pattern",
+		Pattern: "deploy", Note: "foreign", Once: &bTrue,
+	}, 3600, h.clock.Now()); err != nil {
+		t.Fatalf("add watch: %v", err)
+	}
+
+	// A message that would match the foreign watch: no wake (the watch
+	// is skipped).
+	h.fc.pushMessage("m1", "r1", "doug", "time to deploy", nil)
+	waitSettled(t, h, 0, "foreign-owner watch must not fire in resident mode")
+	// The foreign watch is still in the store (not consumed).
+	ws, _ := h.st.ListWatches(context.Background())
+	if len(ws) != 1 || ws[0].Owner != "alice" {
+		t.Errorf("watches = %+v, want the foreign watch still present", ws)
+	}
+	h.stop(t)
+}
+
+// --- Fix 6: cursor catch-up on start and on reconnect ---
+
+func TestCatchUpOnStartReplaysMissedMessages(t *testing.T) {
+	cfg := baseCfg()
+	h := startHarnessWithSetup(t, cfg, func(h *harness) {
+		// Pre-seed the cursor: the daemon was "down" since log 5.
+		if err := h.st.SetCursor(context.Background(), "r1", 5); err != nil {
+			t.Fatalf("set cursor: %v", err)
+		}
+		// Room r1 is joined; the history has a missed mention at log 6.
+		h.srv.setCatchUp(
+			[]map[string]any{{"room_id": "r1"}},
+			map[string][]map[string]any{
+				"r1": {{
+					"message_id": "m6", "log_id": 6, "room_id": "r1",
+					"from":     map[string]any{"user_id": "doug", "name": "doug"},
+					"body":     map[string]any{"text": "squire can you look"},
+					"mentions": []string{"u9"},
+				}},
+			},
+		)
+	})
+
+	// The startup catch-up replays the missed mention.
+	d := h.dlv.wait(t)
+	if !strings.Contains(d.env.Text, "kind=mention") {
+		t.Errorf("catch-up envelope = %q, want a mention wake", d.env.Text)
+	}
+	if d.agent != "squire" {
+		t.Errorf("agent = %q, want squire", d.agent)
+	}
+	// The cursor advanced past the replayed message.
+	if v, _ := h.st.GetCursor(context.Background(), "r1"); v < 6 {
+		t.Errorf("cursor = %d, want >= 6 (replayed)", v)
+	}
+	h.stop(t)
+}
+
+func TestCatchUpOnReconnect(t *testing.T) {
+	cfg := baseCfg()
+	h := startHarness(t, cfg)
+
+	// Pre-seed the cursor and configure the history for the reconnect.
+	if err := h.st.SetCursor(context.Background(), "r1", 5); err != nil {
+		t.Fatalf("set cursor: %v", err)
+	}
+	h.srv.setCatchUp(
+		[]map[string]any{{"room_id": "r1"}},
+		map[string][]map[string]any{
+			"r1": {{
+				"message_id": "m6", "log_id": 6, "room_id": "r1",
+				"from":     map[string]any{"user_id": "doug", "name": "doug"},
+				"body":     map[string]any{"text": "squire can you look"},
+				"mentions": []string{"u9"},
+			}},
+		},
+	)
+
+	// Force a reconnect: the client's OnReconnect fires the catch-up.
+	fc1 := h.srv.connAt(t, 1)
+	fc1.conn.CloseNow()
+	select {
+	case <-fc1.closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for connection close")
+	}
+	// The replacement connection handshakes.
+	go func() {
+		fc2 := h.srv.connAt(t, 2)
+		if err := fc2.handshake(); err != nil {
+			t.Error(err)
+		}
+	}()
+
+	// The reconnect catch-up replays the missed mention.
+	d := h.dlv.wait(t)
+	if !strings.Contains(d.env.Text, "kind=mention") {
+		t.Errorf("reconnect catch-up envelope = %q, want a mention wake", d.env.Text)
+	}
+	h.stop(t)
+}
+
+// --- Fix 7: reply-author cache from the record stream ---
+
+func TestHistoryCacheFedByStream(t *testing.T) {
+	cfg := baseCfg()
+	h := startHarness(t, cfg)
+
+	// The bot posts a message (m2, log 2): its author is cached by the
+	// stream.
+	h.fc.push("message", map[string]any{
+		"message_id": "m2", "log_id": 2, "room_id": "r1",
+		"from": map[string]any{"user_id": "u9", "name": "squire"},
+		"body": map[string]any{"text": "bot post"},
+	})
+	waitCursor(t, h, 2)
+
+	// A reply to the bot's post (m3, log 3): the author (u9) resolves
+	// from the cache (m2 was fed by the stream), so the reply wake
+	// fires without a History call.
+	h.fc.push("message", map[string]any{
+		"message_id": "m3", "log_id": 3, "room_id": "r1",
+		"from":     map[string]any{"user_id": "doug", "name": "doug"},
+		"body":     map[string]any{"text": "reply to bot"},
+		"reply_to": map[string]any{"message_id": "m2"},
+	})
+	d := h.dlv.wait(t)
+	if !strings.Contains(d.env.Text, "kind=reply") {
+		t.Errorf("reply envelope = %q, want a reply wake (author from the cache)", d.env.Text)
+	}
+	h.stop(t)
+}
+
+// TestHistoryCacheMissFallsBackToHistory: a reply to a message not in
+// the stream falls back to the client's History.
+func TestHistoryCacheMissFallsBackToHistory(t *testing.T) {
+	cfg := baseCfg()
+	h := startHarness(t, cfg)
+	// Configure the fake server's history to include the bot's message
+	// (so the History fallback resolves the author).
+	h.srv.setCatchUp(
+		nil,
+		map[string][]map[string]any{
+			"r1": {{
+				"message_id": "m100", "log_id": 100, "room_id": "r1",
+				"from": map[string]any{"user_id": "u9", "name": "squire"},
+				"body": map[string]any{"text": "bot post from history"},
+			}},
+		},
+	)
+	// A reply to m100 (not in the stream): the author resolves via the
+	// History fallback.
+	h.fc.push("message", map[string]any{
+		"message_id": "m101", "log_id": 101, "room_id": "r1",
+		"from":     map[string]any{"user_id": "doug", "name": "doug"},
+		"body":     map[string]any{"text": "reply to history"},
+		"reply_to": map[string]any{"message_id": "m100"},
+	})
+	d := h.dlv.wait(t)
+	if !strings.Contains(d.env.Text, "kind=reply") {
+		t.Errorf("reply envelope = %q, want a reply wake (author from the History fallback)", d.env.Text)
+	}
+	h.stop(t)
 }
