@@ -37,6 +37,8 @@ type Deps struct {
 	OpenStore func() (*store.Store, error)
 	// Env looks up environment variables; nil uses os.LookupEnv.
 	Env func(string) string
+	// Now is the wall clock for guard evaluation; nil uses time.Now.
+	Now func() time.Time
 	// Stdin is read for `post -`; nil reads os.Stdin.
 	Stdin io.Reader
 	// RunDaemon is the daemon entry point the daemon command calls;
@@ -49,6 +51,13 @@ func (d Deps) env() func(string) string {
 		return d.Env
 	}
 	return func(k string) string { v, _ := os.LookupEnv(k); return v }
+}
+
+func (d Deps) now() time.Time {
+	if d.Now != nil {
+		return d.Now()
+	}
+	return time.Now()
 }
 
 // connect returns the room client the handler uses and whether the
@@ -109,7 +118,6 @@ func App(d Deps) *clicontract.App {
 					{Name: "thread-of", Kind: clicontract.String, Usage: "message_id to thread: create a thread and post the first reply anchored to it"},
 					{Name: "format", Kind: clicontract.String, Default: "markdown", Usage: "message format: markdown or plain"},
 					{Name: "json", Kind: clicontract.Bool, Usage: "print the result as JSON"},
-					{Name: "no-subscribe", Kind: clicontract.Bool, Usage: "do not join the posted room after posting"},
 				},
 				Output: clicontract.Output{Mode: clicontract.OutputRaw, SuccessExitCodes: []int{0}},
 				Handle: PostHandler(d),
@@ -174,6 +182,24 @@ func App(d Deps) *clicontract.App {
 						Handle: ListWatchesHandler(d),
 					},
 				},
+			},
+			{
+				Name:  "quiet",
+				Short: "gate the bot's sends for a duration",
+				Long: "Set the send-path quiet gate: posts are refused until the quiet period ends. " +
+					"--for sets the duration (default 8h); --for 0 is indefinite (a large sentinel). " +
+					"Records keep flowing; quiet only gates sends. Use `whinny resume` to clear.",
+				Flags: []clicontract.Flag{
+					{Name: "for", Kind: clicontract.Duration, Default: 8 * time.Hour, Usage: "quiet duration (default 8h; 0 = indefinite)"},
+				},
+				Output: clicontract.Output{Mode: clicontract.OutputRaw, SuccessExitCodes: []int{0}},
+				Handle: QuietHandler(d),
+			},
+			{
+				Name:   "resume",
+				Short:  "clear the send-path quiet gate",
+				Output: clicontract.Output{Mode: clicontract.OutputRaw, SuccessExitCodes: []int{0}},
+				Handle: ResumeHandler(d),
 			},
 			{
 				Name:  "daemon",

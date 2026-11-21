@@ -4,15 +4,22 @@ import (
 	"context"
 	"io"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sdougbrown/cli-contract"
 	"github.com/sdougbrown/whinny/internal/apronws"
+	"github.com/sdougbrown/whinny/internal/guard"
 )
 
-// PostHandler runs `whinny post`: it resolves the target room, posts
-// (creating a thread first when --thread-of is set), and joins the
-// posted room unless --no-subscribe is set.
+// DefaultRatePerMinute is the send-path rate limit when
+// WHINNY_RATE_PER_MINUTE is unset.
+const DefaultRatePerMinute = 20
+
+// PostHandler runs `whinny post`: it evaluates the send-path guard
+// chain, resolves the target room, posts (creating a thread first when
+// --thread-of is set), and joins the posted room.
 func PostHandler(d Deps) clicontract.HandleFunc {
 	return func(ctx context.Context, inv clicontract.Invocation, _ io.Writer) (any, error) {
 		if len(inv.Args) == 0 {
@@ -44,6 +51,11 @@ func PostHandler(d Deps) clicontract.HandleFunc {
 		}
 		if format != "markdown" && format != "plain" {
 			return nil, UsageErrorf("post: --format must be markdown or plain, got %q", format)
+		}
+		// Guard: evaluate the send-path guard chain before connecting.
+		// A denial is a non-zero exit carrying the typed denial text.
+		if err := d.guard(ctx); err != nil {
+			return nil, err
 		}
 		client, owned, err := d.connect(ctx, inv)
 		if err != nil {
@@ -88,10 +100,8 @@ func PostHandler(d Deps) clicontract.HandleFunc {
 		if err != nil {
 			return nil, OperationalErrorf("post: %v", err)
 		}
-		if !inv.Bools["no-subscribe"] {
-			if err := client.JoinRoom(ctx, postRoom); err != nil {
-				return nil, OperationalErrorf("join %s: %v", postRoom, err)
-			}
+		if err := client.JoinRoom(ctx, postRoom); err != nil {
+			return nil, OperationalErrorf("join %s: %v", postRoom, err)
 		}
 		if inv.Bools["json"] {
 			out := map[string]any{"message_id": res.MessageID}
@@ -102,6 +112,61 @@ func PostHandler(d Deps) clicontract.HandleFunc {
 		}
 		return res.MessageID, nil
 	}
+}
+
+// guard evaluates the send-path guard chain before a post connects:
+// the persisted breaker, the persisted rate bucket, and the quiet gate.
+// A denial returns the typed denial text as an operational error
+// (non-zero exit); an allowed send leaves the consumed bucket state
+// persisted by the bucket's save hook.
+func (d Deps) guard(ctx context.Context) error {
+	st, err := d.store()
+	if err != nil {
+		return err
+	}
+	if d.Store == nil {
+		defer st.Close()
+	}
+	brk, err := st.GetBreaker(ctx)
+	if err != nil {
+		return OperationalErrorf("breaker: %v", err)
+	}
+	perMinute := DefaultRatePerMinute
+	if v := d.env()("WHINNY_RATE_PER_MINUTE"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return UsageErrorf("post: WHINNY_RATE_PER_MINUTE must be a positive integer, got %q", v)
+		}
+		perMinute = n
+	}
+	bucket := guard.NewPersistedBucket(
+		func() (float64, time.Time, error) { return st.RateState(ctx) },
+		func(tokens float64, last time.Time) error { return st.SetRateState(ctx, tokens, last) },
+		perMinute,
+	)
+	quietStr, err := st.GetMeta(ctx, MetaQuietUntil)
+	if err != nil {
+		return OperationalErrorf("quiet: %v", err)
+	}
+	var quietUntil int64
+	if quietStr != "" {
+		quietUntil, err = strconv.ParseInt(quietStr, 10, 64)
+		if err != nil {
+			return OperationalErrorf("quiet_until: %v", err)
+		}
+	}
+	chain := guard.NewChain(guard.Config{PerMinute: perMinute})
+	denial, denied := chain.Evaluate(guard.GuardInput{
+		BreakerLatched: brk.Latched,
+		BreakerReason:  brk.Reason,
+		Bucket:         bucket,
+		QuietUntil:     quietUntil,
+		Now:            d.now(),
+	})
+	if denied {
+		return OperationalErrorf("%s: %s", denial.Kind, denial.Text)
+	}
+	return nil
 }
 
 // threadTitle is the first line of the text, truncated to 80 runes.

@@ -34,7 +34,7 @@ func TestSchemaDocument(t *testing.T) {
 	if !ok {
 		t.Fatalf("commands = %T, want an object", m["commands"])
 	}
-	for _, name := range []string{"post", "history", "rooms", "watch", "schema", "manifest", "version"} {
+	for _, name := range []string{"post", "history", "rooms", "watch", "quiet", "resume", "schema", "manifest", "version"} {
 		if _, ok := commands[name]; !ok {
 			t.Fatalf("commands missing %q", name)
 		}
@@ -70,6 +70,7 @@ func TestManifest(t *testing.T) {
 	for _, name := range []string{
 		"whinny-post", "whinny-history", "whinny-rooms",
 		"whinny-watch-add", "whinny-watch-cancel", "whinny-watch-list",
+		"whinny-quiet", "whinny-resume",
 		"whinny-schema", "whinny-manifest", "whinny-version",
 	} {
 		if _, ok := tools[name]; !ok {
