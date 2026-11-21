@@ -13,7 +13,7 @@ a bot's own traffic only evaluates watches, never wakes anyone by its posts,
 and a `peers` map distinguishes bots from humans. The **send path** is the
 single outbound surface (`whinny post`): every post runs the guard chain —
 persisted rate bucket, breaker, quiet gate — and refusals come back as typed
-denials (`refused-rate`, `refused-breaker`, `refused-quiet`), never as prompt
+denials (`refused-rate-limit`, `refused-breaker`, `refused-quiet`), never as prompt
 machinery.
 
 whinny speaks [Apron](https://github.com/shazow/apron) protocol v9 over
