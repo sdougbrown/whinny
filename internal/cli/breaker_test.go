@@ -69,14 +69,14 @@ func TestPostBreakerTripsOnRateLimitDenials(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "refused-breaker") {
 		t.Fatalf("post 5 err = %v, want the trip to refuse with refused-breaker", err)
 	}
-	if !strings.Contains(err.Error(), "5 consecutive rate-limit denials") {
+	if !strings.Contains(err.Error(), "5 consecutive bad send outcomes") {
 		t.Fatalf("post 5 err = %v, want the trip reason", err)
 	}
 	err = postOnce(t, d)
 	if err == nil || !strings.Contains(err.Error(), "refused-breaker") {
 		t.Fatalf("post 6 err = %v, want a refused-breaker denial", err)
 	}
-	if !strings.Contains(err.Error(), "5 consecutive rate-limit denials") {
+	if !strings.Contains(err.Error(), "5 consecutive bad send outcomes") {
 		t.Fatalf("post 6 err = %v, want the persisted latch reason", err)
 	}
 	if len(c.posts) != 0 {
@@ -85,8 +85,8 @@ func TestPostBreakerTripsOnRateLimitDenials(t *testing.T) {
 }
 
 // TestPostBreakerTripsOnPostFailures: five consecutive failed posts
-// (a failing RoomClient) latch the breaker on the fifth with a
-// transport-failure reason; the sixth post is refused by the persisted
+// (a failing RoomClient) latch the breaker on the fifth with the
+// outcome-neutral reason; the sixth post is refused by the persisted
 // latch.
 func TestPostBreakerTripsOnPostFailures(t *testing.T) {
 	c := &fakeClient{
@@ -105,8 +105,8 @@ func TestPostBreakerTripsOnPostFailures(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "refused-breaker") {
 		t.Fatalf("post 5 err = %v, want the trip to refuse with refused-breaker", err)
 	}
-	if !strings.Contains(err.Error(), "5 consecutive post failures") {
-		t.Fatalf("post 5 err = %v, want the transport-failure reason", err)
+	if !strings.Contains(err.Error(), "5 consecutive bad send outcomes") {
+		t.Fatalf("post 5 err = %v, want the trip reason", err)
 	}
 	err = postOnce(t, d)
 	if err == nil || !strings.Contains(err.Error(), "refused-breaker") {
@@ -242,7 +242,7 @@ func TestBreakerLatchPersistsAcrossReopen(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "refused-breaker") {
 		t.Fatalf("post after reopen err = %v, want a refused-breaker denial", err)
 	}
-	if !strings.Contains(err.Error(), "5 consecutive post failures") {
+	if !strings.Contains(err.Error(), "5 consecutive bad send outcomes") {
 		t.Fatalf("post after reopen err = %v, want the persisted reason", err)
 	}
 }

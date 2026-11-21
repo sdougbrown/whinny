@@ -68,7 +68,7 @@ func PostHandler(d Deps) clicontract.HandleFunc {
 			// saw the typed denial and is retrying anyway. A quiet or
 			// breaker denial is not (operator silence; already latched).
 			if denial.Kind == guard.KindRefusedRateLimit {
-				if reason, tripped := d.tripOnFailure(ctx, st, "rate-limit denials"); tripped {
+				if reason, tripped := d.tripOnFailure(ctx, st); tripped {
 					return nil, OperationalErrorf("%s: %s", guard.KindRefusedBreaker, guard.BreakerRefusalText(reason))
 				}
 			}
@@ -81,7 +81,7 @@ func PostHandler(d Deps) clicontract.HandleFunc {
 		// transport error.
 		failSend := func(err error) (any, error) {
 			bucket.Refund()
-			if reason, tripped := d.tripOnFailure(ctx, st, "post failures"); tripped {
+			if reason, tripped := d.tripOnFailure(ctx, st); tripped {
 				return nil, OperationalErrorf("%s: %s", guard.KindRefusedBreaker, guard.BreakerRefusalText(reason))
 			}
 			return nil, err
@@ -201,12 +201,19 @@ func (d Deps) guard(ctx context.Context, st *store.Store) (*guard.RateBucket, gu
 	return bucket, guard.Denial{}, nil
 }
 
+// breakerTripReason is the outcome-neutral latch reason: both trip
+// paths (rate-limit denials and failed posts) bump the same
+// consecutive-failure counter, so the reason names the shared count,
+// not the last outcome.
+const breakerTripReason = "bad send outcomes"
+
 // tripOnFailure bumps the consecutive post-failure counter and, when
-// the bump reaches the trip threshold, latches the breaker. It returns
-// the latch reason when the breaker tripped. A bump or latch error is
-// logged, not returned: the caller reports the send outcome (the
-// original error or the denial) either way.
-func (d Deps) tripOnFailure(ctx context.Context, st *store.Store, what string) (string, bool) {
+// the bump reaches the trip threshold, latches the breaker with the
+// outcome-neutral reason. It returns the latch reason when the
+// breaker tripped. A bump or latch error is logged, not returned: the
+// caller reports the send outcome (the original error or the denial)
+// either way.
+func (d Deps) tripOnFailure(ctx context.Context, st *store.Store) (string, bool) {
 	n, err := st.BumpPostFailures(ctx)
 	if err != nil {
 		log.Printf("whinny: post-failure count: %v", err)
@@ -215,7 +222,7 @@ func (d Deps) tripOnFailure(ctx context.Context, st *store.Store, what string) (
 	if n < guard.BreakerTripThreshold {
 		return "", false
 	}
-	reason := fmt.Sprintf("%d consecutive %s", n, what)
+	reason := fmt.Sprintf("%d consecutive %s", n, breakerTripReason)
 	if err := st.SetBreaker(ctx, store.Breaker{
 		Latched:   true,
 		LatchedAt: d.now().Unix(),
