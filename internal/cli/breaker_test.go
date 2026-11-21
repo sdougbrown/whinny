@@ -278,6 +278,50 @@ func TestBreakerClear(t *testing.T) {
 	}
 }
 
+// TestPostBreakerRefusalMatchesGuardFormat: the post-side trip refusal
+// is formatted by the same helper as the guard chain's breaker denial:
+// for the same reason the post's error text is exactly the chain's
+// denial text with the kind prefix.
+func TestPostBreakerRefusalMatchesGuardFormat(t *testing.T) {
+	c := &fakeClient{
+		joined:  []apronws.Room{{ID: "r1", Title: "General"}},
+		postID:  "msg-1",
+		postErr: errors.New("send failed"),
+	}
+	d := breakerDeps(t, c)
+	for i := 0; i < guard.BreakerTripThreshold; i++ {
+		if err := postOnce(t, d); err == nil {
+			t.Fatalf("post %d: want a failure, got nil", i+1)
+		}
+	}
+	brk, err := d.Store.GetBreaker(context.Background())
+	if err != nil {
+		t.Fatalf("GetBreaker: %v", err)
+	}
+	if !brk.Latched {
+		t.Fatal("breaker not latched after the trip")
+	}
+	// The chain's denial for the same persisted reason.
+	chain := guard.NewChain(guard.Config{PerMinute: 10})
+	denial, denied := chain.Evaluate(guard.GuardInput{
+		BreakerLatched: brk.Latched,
+		BreakerReason:  brk.Reason,
+		Now:            time.Unix(2_000_000, 0),
+	})
+	if !denied || denial.Kind != guard.KindRefusedBreaker {
+		t.Fatalf("chain Evaluate: (%+v, %v), want a breaker denial", denial, denied)
+	}
+	// The post-side refusal for the same reason.
+	err = postOnce(t, d)
+	if err == nil {
+		t.Fatal("want a refusal, got nil")
+	}
+	want := guard.KindRefusedBreaker + ": " + denial.Text
+	if err.Error() != want {
+		t.Errorf("post refusal = %q, want %q (the guard's format for the same reason)", err.Error(), want)
+	}
+}
+
 // TestPostRoomResolutionErrorDoesNotBump: a misspelled room is a usage
 // error the caller can fix — it refunds without advancing the failure
 // counter, so it can never contribute to a breaker trip.

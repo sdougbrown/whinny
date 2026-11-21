@@ -69,7 +69,7 @@ func PostHandler(d Deps) clicontract.HandleFunc {
 			// breaker denial is not (operator silence; already latched).
 			if denial.Kind == guard.KindRefusedRateLimit {
 				if reason, tripped := d.tripOnFailure(ctx, st, "rate-limit denials"); tripped {
-					return nil, OperationalErrorf("%s: latched (%s), do not retry", guard.KindRefusedBreaker, reason)
+					return nil, OperationalErrorf("%s: %s", guard.KindRefusedBreaker, guard.BreakerRefusalText(reason))
 				}
 			}
 			return nil, OperationalErrorf("%s: %s", denial.Kind, denial.Text)
@@ -82,7 +82,7 @@ func PostHandler(d Deps) clicontract.HandleFunc {
 		failSend := func(err error) (any, error) {
 			bucket.Refund()
 			if reason, tripped := d.tripOnFailure(ctx, st, "post failures"); tripped {
-				return nil, OperationalErrorf("%s: latched (%s), do not retry", guard.KindRefusedBreaker, reason)
+				return nil, OperationalErrorf("%s: %s", guard.KindRefusedBreaker, guard.BreakerRefusalText(reason))
 			}
 			return nil, err
 		}
