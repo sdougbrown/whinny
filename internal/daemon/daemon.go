@@ -68,8 +68,11 @@ type daemon struct {
 	// procMu serializes record handling between the live loop and the
 	// reconnect catch-up goroutine: the cursor dedupe is check-then-act
 	// (GetCursor then SetCursor, with no store-side lock spanning both),
-	// so an unlocked overlap lets one message evaluate twice. Held across
-	// the whole handleRecord body; Deliver must not re-enter handleRecord.
+	// so an unlocked overlap lets one message evaluate twice. Held only
+	// across the dedupe check, evaluation, and enqueue; delivery (the
+	// queue flush and shared callbacks) runs after the lock is released
+	// so a slow deliverer cannot stall live processing or catch-up.
+	// Deliver must not re-enter handleRecord.
 	procMu sync.Mutex
 }
 
@@ -253,14 +256,33 @@ func (d *daemon) catchUp(ctx context.Context) {
 }
 
 // handleRecord processes one inbound push. Only message records carry
-// policy weight; room updates and activities are ignored.
+// policy weight; room updates and activities are ignored. procMu is
+// held only across the cursor check-then-act dedupe, evaluation, and
+// enqueue; delivery (the queue flush and shared callbacks) runs after
+// the lock is released so a slow deliverer cannot stall live
+// processing or catch-up.
 func (d *daemon) handleRecord(ctx context.Context, rec apronws.Record, subscribe bool) {
-	d.procMu.Lock()
-	defer d.procMu.Unlock()
 	if rec.Kind != apronws.KindMessage || rec.Message == nil {
 		return
 	}
 	m := rec.Message
+	d.procMu.Lock()
+	deliveries, flush := d.processRecord(ctx, m, subscribe)
+	d.procMu.Unlock()
+	for _, h := range deliveries {
+		d.deliverShared(ctx, h)
+	}
+	if flush {
+		d.flushQueue(ctx)
+	}
+}
+
+// processRecord runs one message's cursor check-then-act dedupe,
+// evaluation, and enqueue; it must be called with procMu held. It
+// returns the shared-mode deliveries owed (the caller delivers them
+// after releasing procMu) and whether a queue flush is owed (a
+// resident wake was enqueued).
+func (d *daemon) processRecord(ctx context.Context, m *apronws.Message, subscribe bool) (deliveries []sharedHit, flush bool) {
 	// Dedupe against the room cursor: a replayed message (catch-up) or a
 	// duplicate push at or below the cursor is already evaluated. The
 	// SetCursor max-upsert below advances the dedup line for both the
@@ -270,7 +292,7 @@ func (d *daemon) handleRecord(ctx context.Context, rec apronws.Record, subscribe
 	if err != nil {
 		log.Printf("daemon: get cursor %s: %v", m.RoomID, err)
 	} else if int64(m.LogID) <= cursor {
-		return
+		return nil, false
 	}
 	// Feed the reply-author cache as records stream past, so a later
 	// reply to this message resolves without a History call. The author
@@ -282,7 +304,7 @@ func (d *daemon) handleRecord(ctx context.Context, rec apronws.Record, subscribe
 	// A delete tombstone carries no body: nothing to evaluate, and the
 	// auto-subscription anchors on a body-carrying post.
 	if m.Body == nil || m.Deleted {
-		return
+		return nil, false
 	}
 	// The bot's own posts arm thread subscriptions and are never
 	// evaluated against the policy: no self-wake loops.
@@ -290,13 +312,12 @@ func (d *daemon) handleRecord(ctx context.Context, rec apronws.Record, subscribe
 		if subscribe && m.ReplyTo != nil {
 			d.subscribeOwnThread(ctx, m)
 		}
-		return
+		return nil, false
 	}
 	if d.cfg.Mode == ModeShared {
-		d.handleShared(ctx, m)
-		return
+		return d.handleSharedLocked(ctx, m), false
 	}
-	d.handleResident(ctx, m)
+	return nil, d.handleResidentLocked(ctx, m)
 }
 
 // subscribeOwnThread arms a subscription watch on the thread the bot
@@ -316,10 +337,12 @@ func (d *daemon) subscribeOwnThread(ctx context.Context, m *apronws.Message) {
 	}
 }
 
-// handleResident runs the full policy for one message and acts on the
-// decision: enqueue for durability, then deliver immediately, then
-// remove fired once-watches.
-func (d *daemon) handleResident(ctx context.Context, m *apronws.Message) {
+// handleResidentLocked runs the full policy for one message and, on a
+// wake, enqueues it for durability and removes fired once-watches. It
+// must be called with procMu held; the caller flushes the queue after
+// releasing the lock so a slow delivery cannot stall live processing.
+// It reports whether a wake was enqueued (a flush is owed).
+func (d *daemon) handleResidentLocked(ctx context.Context, m *apronws.Message) bool {
 	msg := mapMsg(m)
 	watches := d.roomWatches(ctx, m.RoomID)
 	var resident []store.Watch
@@ -341,31 +364,35 @@ func (d *daemon) handleResident(ctx context.Context, m *apronws.Message) {
 		Clock:      d.clock,
 	})
 	if !dec.Wake {
-		return
+		return false
 	}
 	env := BuildEnvelope(dec, msg)
 	env.ImageURL = firstImageURL(m)
 	payload, err := encodePayload(env)
 	if err != nil {
 		log.Printf("daemon: encode wake: %v", err)
-		return
+		return false
 	}
 	if _, err := d.store.EnqueueWake(ctx, store.Wake{Agent: d.cfg.Agent, Payload: payload}, d.now()); err != nil {
 		log.Printf("daemon: enqueue wake: %v", err)
-		return
+		return false
 	}
-	d.flushQueue(ctx)
 	for _, id := range dec.RemoveWatchIDs {
 		if err := d.store.DeleteWatch(ctx, id); err != nil {
 			log.Printf("daemon: delete watch %s: %v", id, err)
 		}
 	}
+	return true
 }
 
 // flushQueue delivers and removes every queued wake for this agent.
-// A dequeue error is logged and returned; the caller decides whether
-// it is fatal (the startup drain propagates it, the live loop does
-// not).
+// Callers may overlap (the live loop's flush and the catch-up
+// goroutine's flush run concurrently now that delivery is outside
+// procMu): the store's dequeue is a transactional fetch+delete, so a
+// wake is still delivered at most once; wake ordering across
+// concurrent flushes is best-effort. A dequeue error is logged and
+// returned; the caller decides whether it is fatal (the startup drain
+// propagates it, the live loop does not).
 func (d *daemon) flushQueue(ctx context.Context) error {
 	wakes, err := d.store.DequeueWakes(ctx, d.cfg.Agent)
 	if err != nil {
@@ -403,13 +430,23 @@ func (d *daemon) lookupAuthor(ctx context.Context, roomID, messageID string) (st
 	return author, ok, err
 }
 
-// handleShared routes watch hits to their owners. No mention/reply/ambient
-// evaluation, no durable queue: a delivery failure is logged and dropped,
-// because the transient run the wake belonged to may be gone. Only watches
-// whose owner has a delivery callback are evaluated: a resident-owned watch
-// has no callback and must not be fired (or its once-watch consumed) by a
-// shared daemon.
-func (d *daemon) handleShared(ctx context.Context, m *apronws.Message) {
+// sharedHit is one shared-mode watch hit ready for delivery.
+type sharedHit struct {
+	owner string
+	env   Envelope
+	cmd   []string
+}
+
+// handleSharedLocked evaluates the shared policy for one message and
+// returns the watch hits owed a delivery; the caller delivers them
+// after releasing procMu so a slow callback cannot stall live
+// processing. It must be called with procMu held. No mention/reply/
+// ambient evaluation, no durable queue: a delivery failure is logged
+// and dropped, because the transient run the wake belonged to may be
+// gone. Only watches whose owner has a delivery callback are evaluated:
+// a resident-owned watch has no callback and must not be fired (or its
+// once-watch consumed) by a shared daemon.
+func (d *daemon) handleSharedLocked(ctx context.Context, m *apronws.Message) []sharedHit {
 	msg := mapMsg(m)
 	var watches []store.Watch
 	for _, w := range d.roomWatches(ctx, m.RoomID) {
@@ -426,6 +463,7 @@ func (d *daemon) handleShared(ctx context.Context, m *apronws.Message) {
 	})
 	// Mention/reply/ambient decisions carry no watch hits here; only
 	// watch fires are acted on.
+	var out []sharedHit
 	for _, hit := range dec.Watches {
 		hitDec := wake.Decision{
 			Wake:    true,
@@ -435,20 +473,28 @@ func (d *daemon) handleShared(ctx context.Context, m *apronws.Message) {
 		}
 		env := BuildEnvelope(hitDec, msg)
 		env.ImageURL = firstImageURL(m)
-		if cmd := d.ownerCommand(ctx, hit.Owner); len(cmd) > 0 {
-			if err := (&execDeliverer{cmd: cmd}).Deliver(ctx, hit.Owner, env); err != nil {
-				log.Printf("daemon: deliver watch wake to %s: %v", hit.Owner, err)
-			}
-			continue
-		}
-		if err := d.dlv.Deliver(ctx, hit.Owner, env); err != nil {
-			log.Printf("daemon: deliver watch wake to %s: %v", hit.Owner, err)
-		}
+		out = append(out, sharedHit{owner: hit.Owner, env: env, cmd: d.ownerCommand(ctx, hit.Owner)})
 	}
 	for _, id := range dec.RemoveWatchIDs {
 		if err := d.store.DeleteWatch(ctx, id); err != nil {
 			log.Printf("daemon: delete watch %s: %v", id, err)
 		}
+	}
+	return out
+}
+
+// deliverShared delivers one shared-mode hit: the owner's callback when
+// one is set, else the injected deliverer. A failure is logged and
+// dropped (the transient run may be gone; at-most-once).
+func (d *daemon) deliverShared(ctx context.Context, h sharedHit) {
+	if len(h.cmd) > 0 {
+		if err := (&execDeliverer{cmd: h.cmd}).Deliver(ctx, h.owner, h.env); err != nil {
+			log.Printf("daemon: deliver watch wake to %s: %v", h.owner, err)
+		}
+		return
+	}
+	if err := d.dlv.Deliver(ctx, h.owner, h.env); err != nil {
+		log.Printf("daemon: deliver watch wake to %s: %v", h.owner, err)
 	}
 }
 

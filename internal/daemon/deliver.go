@@ -123,6 +123,7 @@ type FeedImage struct {
 // (the oldest is evicted before a new one is written).
 type feedDeliverer struct {
 	out          io.Writer
+	outMu        sync.Mutex // guards out: queue flushes are concurrent
 	client       *http.Client
 	clientMu     sync.Mutex
 	dir          string
@@ -204,10 +205,10 @@ func (d *feedDeliverer) Deliver(ctx context.Context, _ string, env Envelope) err
 	if err != nil {
 		return err
 	}
-	if _, err := d.out.Write(append(b, '\n')); err != nil {
-		return err
-	}
-	return nil
+	d.outMu.Lock()
+	_, err = d.out.Write(append(b, '\n'))
+	d.outMu.Unlock()
+	return err
 }
 
 // fetchImage fetches url, caps at MaxImageBytes, writes the bytes to the

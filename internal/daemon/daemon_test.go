@@ -307,6 +307,42 @@ func (f *fakeDeliverer) last(t *testing.T) delivered {
 	return f.got[len(f.got)-1]
 }
 
+// blockingDeliverer blocks every delivery until block is closed and
+// signals entered (the first delivery started) and second (a second
+// delivery was attempted, while the first is still blocked):
+// a deterministic slow-delivery simulation (no sleeps).
+type blockingDeliverer struct {
+	mu      sync.Mutex
+	calls   int
+	entered chan struct{}
+	block   chan struct{}
+	second  chan struct{}
+}
+
+func (b *blockingDeliverer) Deliver(_ context.Context, _ string, _ Envelope) error {
+	b.mu.Lock()
+	n := b.calls
+	b.calls++
+	b.mu.Unlock()
+	if n == 0 {
+		b.entered <- struct{}{}
+	} else {
+		b.second <- struct{}{}
+	}
+	<-b.block
+	return nil
+}
+
+// waitFor blocks until c is signaled or the test deadline passes.
+func waitFor(t *testing.T, c <-chan struct{}, why string) {
+	t.Helper()
+	select {
+	case <-c:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for %s", why)
+	}
+}
+
 // fakeClock is an injected time source.
 type fakeClock struct {
 	mu sync.Mutex
@@ -353,6 +389,13 @@ type harness struct {
 // apronws.Client, a store, and a running daemon.
 func startHarness(t *testing.T, cfg Config) *harness {
 	t.Helper()
+	return startHarnessWithDeliverer(t, cfg, nil)
+}
+
+// startHarnessWithDeliverer is like startHarness but uses the given
+// deliverer (the harness's fakeDeliverer is not wired in).
+func startHarnessWithDeliverer(t *testing.T, cfg Config, custom Deliverer) *harness {
+	t.Helper()
 	h := &harness{
 		srv:    newFakeServer(t),
 		dlv:    newFakeDeliverer(),
@@ -381,10 +424,14 @@ func startHarness(t *testing.T, cfg Config) *harness {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	h.cancel = cancel
+	var deliver Deliverer = h.dlv
+	if custom != nil {
+		deliver = custom
+	}
 	deps := Deps{
 		Client:  client,
 		Store:   h.st,
-		Deliver: h.dlv,
+		Deliver: deliver,
 		Clock:   h.clock,
 		Now:     h.clock.Now,
 		Ticker:  func(time.Duration) Ticker { return h.ticker },
@@ -1403,5 +1450,62 @@ func TestReplyWakeRetriesFailedHistoryLookup(t *testing.T) {
 	if !strings.Contains(d.env.Text, "kind=reply") {
 		t.Errorf("reply envelope = %q, want a reply wake (lookup retried past two failures)", d.env.Text)
 	}
+	h.stop(t)
+}
+
+// TestSlowDelivererDoesNotBlockRecordProcessing: a blocked first
+// delivery must not hold procMu: while the first delivery is still
+// blocked, the reconnect catch-up evaluates and enqueues a second
+// message, whose delivery is attempted concurrently (delivery runs
+// after the lock is released).
+func TestSlowDelivererDoesNotBlockRecordProcessing(t *testing.T) {
+	cfg := baseCfg()
+	bd := &blockingDeliverer{
+		entered: make(chan struct{}),
+		block:   make(chan struct{}),
+		second:  make(chan struct{}),
+	}
+	h := startHarnessWithDeliverer(t, cfg, bd)
+
+	// m1 (log 1) is a live mention: the daemon enqueues it and the
+	// flush blocks in the deliverer.
+	h.fc.pushMessageAt("m1", "r1", "doug", "squire can you look", []string{"u9"}, 1)
+	waitFor(t, bd.entered, "the first delivery to start")
+
+	// m2 (log 2) is replayed by the reconnect catch-up while the first
+	// delivery is still blocked. The cursor is already at 1 (m1), so
+	// only m2 is replayed.
+	h.srv.setCatchUp(
+		[]map[string]any{{"room_id": "r1"}},
+		map[string][]map[string]any{
+			"r1": {{
+				"message_id": "m2", "log_id": 2, "room_id": "r1",
+				"from":     map[string]any{"user_id": "doug", "name": "doug"},
+				"body":     map[string]any{"text": "squire can you look"},
+				"mentions": []string{"u9"},
+			}},
+		},
+	)
+	fc1 := h.srv.connAt(t, 1)
+	fc1.conn.CloseNow()
+	select {
+	case <-fc1.closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for connection close")
+	}
+	fc2 := h.srv.connAt(t, 2)
+	errC := make(chan error, 1)
+	go func() { errC <- fc2.handshake() }()
+	if err := <-errC; err != nil {
+		t.Fatalf("server handshake: %v", err)
+	}
+
+	// The catch-up evaluates m2 and its flush delivers it while the
+	// first delivery is still blocked: a slow delivery does not hold
+	// procMu.
+	waitFor(t, bd.second, "the second delivery to start while the first is blocked")
+
+	// Release the blocked deliveries and shut down.
+	close(bd.block)
 	h.stop(t)
 }
