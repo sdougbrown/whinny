@@ -256,18 +256,32 @@ func (d *daemon) catchUp(ctx context.Context) {
 }
 
 // handleRecord processes one inbound push. Only message records carry
-// policy weight; room updates and activities are ignored. procMu is
-// held only across the cursor check-then-act dedupe, evaluation, and
-// enqueue; delivery (the queue flush and shared callbacks) runs after
-// the lock is released so a slow deliverer cannot stall live
-// processing or catch-up.
+// policy weight; room updates and activities are ignored. Two-phase
+// resolution: the reply-author lookup (a network call with a bounded
+// retry) runs outside procMu — holding the lock across it would stall
+// the live loop and catch-up. The author is pre-resolved before the
+// lock, only for messages that carry a reply_to (the only path that
+// needs the author). procMu is then held only across the cursor
+// check-then-act dedupe, evaluation, and enqueue; delivery (the queue
+// flush and shared callbacks) runs after the lock is released so a
+// slow deliverer cannot stall live processing or catch-up.
 func (d *daemon) handleRecord(ctx context.Context, rec apronws.Record, subscribe bool) {
 	if rec.Kind != apronws.KindMessage || rec.Message == nil {
 		return
 	}
 	m := rec.Message
+	// Pre-resolve the reply target's author outside procMu (see the
+	// comment above). Only a reply_to needs the author. The dedupe
+	// check-then-act below runs entirely under procMu, so no re-check
+	// is needed: the lookup never runs while the lock is held.
+	var author string
+	var authorOK bool
+	var authorErr error
+	if m.ReplyTo != nil {
+		author, authorOK, authorErr = d.lookupAuthor(ctx, m.RoomID, m.ReplyTo.MessageID)
+	}
 	d.procMu.Lock()
-	deliveries, flush := d.processRecord(ctx, m, subscribe)
+	deliveries, flush := d.processRecord(ctx, m, subscribe, author, authorOK, authorErr)
 	d.procMu.Unlock()
 	for _, h := range deliveries {
 		d.deliverShared(ctx, h)
@@ -278,11 +292,13 @@ func (d *daemon) handleRecord(ctx context.Context, rec apronws.Record, subscribe
 }
 
 // processRecord runs one message's cursor check-then-act dedupe,
-// evaluation, and enqueue; it must be called with procMu held. It
-// returns the shared-mode deliveries owed (the caller delivers them
-// after releasing procMu) and whether a queue flush is owed (a
-// resident wake was enqueued).
-func (d *daemon) processRecord(ctx context.Context, m *apronws.Message, subscribe bool) (deliveries []sharedHit, flush bool) {
+// evaluation, and enqueue; it must be called with procMu held. The
+// reply target's author is pre-resolved by the caller (outside
+// procMu); processRecord passes it to the evaluation. It returns the
+// shared-mode deliveries owed (the caller delivers them after
+// releasing procMu) and whether a queue flush is owed (a resident wake
+// was enqueued).
+func (d *daemon) processRecord(ctx context.Context, m *apronws.Message, subscribe bool, author string, authorOK bool, authorErr error) (deliveries []sharedHit, flush bool) {
 	// Dedupe against the room cursor: a replayed message (catch-up) or a
 	// duplicate push at or below the cursor is already evaluated. The
 	// SetCursor max-upsert below advances the dedup line for both the
@@ -317,7 +333,7 @@ func (d *daemon) processRecord(ctx context.Context, m *apronws.Message, subscrib
 	if d.cfg.Mode == ModeShared {
 		return d.handleSharedLocked(ctx, m), false
 	}
-	return nil, d.handleResidentLocked(ctx, m)
+	return nil, d.handleResidentLocked(ctx, m, author, authorOK, authorErr)
 }
 
 // subscribeOwnThread arms a subscription watch on the thread the bot
@@ -341,8 +357,10 @@ func (d *daemon) subscribeOwnThread(ctx context.Context, m *apronws.Message) {
 // wake, enqueues it for durability and removes fired once-watches. It
 // must be called with procMu held; the caller flushes the queue after
 // releasing the lock so a slow delivery cannot stall live processing.
-// It reports whether a wake was enqueued (a flush is owed).
-func (d *daemon) handleResidentLocked(ctx context.Context, m *apronws.Message) bool {
+// The reply target's author is pre-resolved by the caller (outside
+// procMu); the HistoryLookup returns that value without touching the
+// network. It reports whether a wake was enqueued (a flush is owed).
+func (d *daemon) handleResidentLocked(ctx context.Context, m *apronws.Message, author string, authorOK bool, authorErr error) bool {
 	msg := mapMsg(m)
 	watches := d.roomWatches(ctx, m.RoomID)
 	var resident []store.Watch
@@ -356,8 +374,11 @@ func (d *daemon) handleResidentLocked(ctx context.Context, m *apronws.Message) b
 		Self:    d.cfg.Self,
 		Peers:   d.cfg.Peers,
 		Watches: resident,
+		// The author was pre-resolved outside procMu (see
+		// handleRecord); this lookup returns that value without
+		// touching the network.
 		History: func(ctx context.Context, messageID string) (string, bool, error) {
-			return d.lookupAuthor(ctx, m.RoomID, messageID)
+			return author, authorOK, authorErr
 		},
 		Classifier: d.class,
 		Gate:       d.gate,
@@ -408,9 +429,12 @@ func (d *daemon) flushQueue(ctx context.Context) error {
 }
 
 // lookupAuthor resolves the reply target's author, retrying a failed
-// History lookup up to 3 times (1-second pause between attempts). The
-// room cursor has already advanced, so catch-up will not replay the
-// message; a lost lookup loses the reply wake (at-most-once,
+// History lookup up to 3 times (1-second pause between attempts, each
+// attempt bounded by a 5-second timeout). It is a network call and runs
+// outside procMu (see handleRecord): holding the lock across the retry
+// would stall the live loop and catch-up. The room cursor advances
+// after the lookup (regardless of its outcome), so catch-up will not
+// replay the message; a lost lookup loses the reply wake (at-most-once,
 // documented). The bounded retry narrows the window.
 func (d *daemon) lookupAuthor(ctx context.Context, roomID, messageID string) (string, bool, error) {
 	const maxAttempts = 4
@@ -418,7 +442,9 @@ func (d *daemon) lookupAuthor(ctx context.Context, roomID, messageID string) (st
 	var ok bool
 	var err error
 	for attempt := 1; ; attempt++ {
-		author, ok, err = d.hist.lookup(ctx, roomID, messageID)
+		attemptCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		author, ok, err = d.hist.lookup(attemptCtx, roomID, messageID)
+		cancel()
 		if err == nil || attempt == maxAttempts {
 			break
 		}
