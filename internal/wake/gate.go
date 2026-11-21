@@ -18,38 +18,68 @@ type AmbientGate struct {
 }
 
 // NewAmbientGate returns an AmbientGate with the given min spacing and
-// per-hour cap.
+// per-hour cap. A negative cap is treated as 0: every ambient wake is
+// denied.
 func NewAmbientGate(minSpacing time.Duration, maxPerHour int) *AmbientGate {
+	if maxPerHour < 0 {
+		maxPerHour = 0
+	}
 	return &AmbientGate{MinSpacing: minSpacing, MaxPerHour: maxPerHour}
 }
 
-// Allow reports whether an ambient wake is permitted at now. It is
-// blocked if the last ambient wake was less than MinSpacing ago, or if
-// there are already MaxPerHour ambient wakes in the trailing hour.
-func (g *AmbientGate) Allow(now time.Time) bool {
+// TryReserve checks the valves (min spacing, per-hour cap) and, when
+// they pass, records the wake — atomically under the mutex. It returns
+// false without recording when a valve blocks.
+func (g *AmbientGate) TryReserve(now time.Time) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.prune(now)
 	if g.hasLast && now.Sub(g.last) < g.MinSpacing {
 		return false
 	}
-	if g.MaxPerHour >= 0 && len(g.wakes) >= g.MaxPerHour {
+	if len(g.wakes) >= g.MaxPerHour {
 		return false
 	}
+	g.last = now
+	g.hasLast = true
+	g.wakes = append(g.wakes, now)
 	return true
 }
 
-// Record marks an ambient wake at now.
-func (g *AmbientGate) Record(now time.Time) {
+// Release removes the reservation made at now (a classifier definitive
+// no), restoring the spacing and trailing-hour state.
+func (g *AmbientGate) Release(now time.Time) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.last = now
-	g.hasLast = true
-	g.prune(now)
-	g.wakes = append(g.wakes, now)
+	removed := -1
+	for i, t := range g.wakes {
+		if t.Equal(now) {
+			removed = i
+			break
+		}
+	}
+	if removed < 0 {
+		return
+	}
+	g.wakes = append(g.wakes[:removed], g.wakes[removed+1:]...)
+	if g.last.Equal(now) {
+		var newest time.Time
+		for _, t := range g.wakes {
+			if t.After(newest) {
+				newest = t
+			}
+		}
+		if newest.IsZero() {
+			g.last = time.Time{}
+			g.hasLast = false
+		} else {
+			g.last = newest
+		}
+	}
 }
 
 // prune drops wake timestamps that are not within the trailing hour.
+// The caller must hold g.mu.
 func (g *AmbientGate) prune(now time.Time) {
 	cutoff := now.Add(-time.Hour)
 	n := 0

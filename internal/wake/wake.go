@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/sdougbrown/whinny/internal/watch"
 )
 
 // Kind discriminates the reason a wake fired.
@@ -19,19 +21,6 @@ const (
 	KindWatch Kind = "watch"
 	// KindAmbient is a wake from the ambient gate.
 	KindAmbient Kind = "ambient"
-)
-
-// Watch kinds.
-const (
-	// WatchKindEdge watches for a reply to a specific message.
-	WatchKindEdge = "edge"
-	// WatchKindPattern watches for a pattern in the text or an embed.
-	WatchKindPattern = "pattern"
-	// WatchKindThread watches for a reply in a thread.
-	WatchKindThread = "thread"
-	// WatchKindSubscription watches a thread the bot posted in, excluding
-	// the bot's own posts.
-	WatchKindSubscription = "subscription"
 )
 
 // From identifies the author of a message.
@@ -74,17 +63,13 @@ type Peer struct {
 // Peers maps user_id to a Peer.
 type Peers map[string]Peer
 
-// Watch is a registered condition the policy evaluates.
-type Watch struct {
-	ID       string
-	RoomID   string
-	Kind     string
-	FromUser string
-	Pattern  string
-	ThreadID string
-	ReplyTo  string
-	Note     string
-	Once     bool
+// WatchHit is one matching watch in a Decision, carrying the owner
+// attribution the caller needs to route the wake.
+type WatchHit struct {
+	ID    string
+	Owner string
+	Note  string
+	Once  bool
 }
 
 // HistoryLookup resolves the author of a message from room history. ok is
@@ -106,7 +91,7 @@ type In struct {
 	Msg        Msg
 	Self       Self
 	Peers      Peers
-	Watches    []Watch
+	Watches    []watch.Watch
 	History    HistoryLookup
 	Classifier Classifier
 	Gate       *AmbientGate
@@ -115,36 +100,50 @@ type In struct {
 
 // Decision is the outcome of one evaluation.
 type Decision struct {
-	Wake           bool
-	Kind           Kind
-	Reason         string
+	Wake   bool
+	Kind   Kind
+	Reason string
+	// Watches is every watch that matched, on any fired path.
+	Watches []WatchHit
+	// RemoveWatchIDs is the id of every once-watch that matched; the
+	// caller removes them.
 	RemoveWatchIDs []string
 }
 
-// Evaluate runs the wake policy in order: mention, reply-to-my-message,
-// watch match, bot firebreak, ambient gate. The first match wins.
+// Evaluate runs the wake policy:
+//
+//   - mention: any sender that mentions the bot wakes; the evaluation
+//     stops there.
+//   - bot sender: only watches are evaluated (firebreak); a match wakes
+//     with kind watch, otherwise the message is ignored.
+//   - human sender: reply-to-my-message, then watch matches, then the
+//     ambient gate (only when nothing above fired).
+//
+// Every matching watch fires: all of them appear in Decision.Watches and
+// their once-ids in Decision.RemoveWatchIDs, whatever the winning kind.
+// Kind is the highest-priority fired path (mention > reply > watch >
+// ambient); Wake is true if any path fired; Reason comes from the
+// primary path.
 func Evaluate(ctx context.Context, in In) Decision {
 	if name, ok := mentioned(in.Self, in.Msg); ok {
 		return Decision{Wake: true, Kind: KindMention, Reason: `mentioned "` + name + `"`}
 	}
+	hits := matchWatches(in.Msg, in.Self, in.Watches)
+	if isBot(in.Peers, in.Msg.From.UserID) {
+		if len(hits) == 0 {
+			return Decision{}
+		}
+		return watchDecision(hits)
+	}
+	replyFired := false
 	if in.Msg.ReplyTo != "" && in.History != nil {
 		if author, ok, err := in.History(ctx, in.Msg.ReplyTo); err == nil && ok && author == in.Self.UserID {
-			return Decision{Wake: true, Kind: KindReply, Reason: "reply to my message"}
+			replyFired = true
 		}
 	}
-	if w, ok := matchWatch(in.Msg, in.Self, in.Watches); ok {
-		d := Decision{Wake: true, Kind: KindWatch, Reason: w.Note}
-		if w.Once {
-			d.RemoveWatchIDs = []string{w.ID}
-		}
-		return d
-	}
-	if isBot(in.Peers, in.Msg.From.UserID) {
-		return Decision{}
-	}
-	if in.Gate != nil && in.Clock != nil && in.Classifier != nil {
+	if !replyFired && len(hits) == 0 && in.Gate != nil && in.Clock != nil && in.Classifier != nil {
 		now := in.Clock.Now()
-		if in.Gate.Allow(now) {
+		if in.Gate.TryReserve(now) {
 			directed, err := in.Classifier.IsDirected(ctx, in.Msg, in.Self)
 			if err != nil {
 				// Fail-open: a false positive costs one cheap no-op wake;
@@ -152,18 +151,54 @@ func Evaluate(ctx context.Context, in In) Decision {
 				directed = true
 			}
 			if directed {
-				in.Gate.Record(now)
 				return Decision{Wake: true, Kind: KindAmbient, Reason: "ambient"}
 			}
+			// A definitive no releases the reservation so the valve
+			// state stays exact.
+			in.Gate.Release(now)
 		}
 	}
+	if replyFired {
+		return Decision{
+			Wake:           true,
+			Kind:           KindReply,
+			Reason:         "reply to my message",
+			Watches:        hits,
+			RemoveWatchIDs: onceIDs(hits),
+		}
+	}
+	if len(hits) > 0 {
+		return watchDecision(hits)
+	}
 	return Decision{}
+}
+
+// watchDecision builds the decision for a fired set of watch hits.
+func watchDecision(hits []WatchHit) Decision {
+	return Decision{
+		Wake:           true,
+		Kind:           KindWatch,
+		Reason:         hits[0].Note,
+		Watches:        hits,
+		RemoveWatchIDs: onceIDs(hits),
+	}
+}
+
+// onceIDs returns the ids of the once-hits, in hit order.
+func onceIDs(hits []WatchHit) []string {
+	var ids []string
+	for _, h := range hits {
+		if h.Once {
+			ids = append(ids, h.ID)
+		}
+	}
+	return ids
 }
 
 // ExpiryDecision is the wake decision for a watch that expired without
 // matching. The caller obtains due watches from the store and delivers
 // these decisions.
-func ExpiryDecision(w Watch) Decision {
+func ExpiryDecision(w watch.Watch) Decision {
 	return Decision{Wake: true, Kind: KindWatch, Reason: "no match within ttl: " + w.Note}
 }
 
@@ -211,33 +246,37 @@ func isBot(peers Peers, userID string) bool {
 	return ok && p.IsBot
 }
 
-// matchWatch returns the first watch that matches the message.
-func matchWatch(msg Msg, self Self, watches []Watch) (Watch, bool) {
+// matchWatches returns every watch that matches the message, in list
+// order. A watch with an empty RoomID never matches.
+func matchWatches(msg Msg, self Self, watches []watch.Watch) []WatchHit {
+	var hits []WatchHit
 	for _, w := range watches {
-		if w.RoomID != "" && w.RoomID != msg.RoomID {
+		if w.RoomID == "" || w.RoomID != msg.RoomID {
 			continue
 		}
 		if w.FromUser != "" && w.FromUser != msg.From.UserID {
 			continue
 		}
-		if w.Kind == WatchKindSubscription && msg.From.UserID == self.UserID {
+		if w.Kind == watch.KindSubscription && msg.From.UserID == self.UserID {
 			continue
 		}
 		if watchMatches(w, msg) {
-			return w, true
+			once := w.Once == nil || *w.Once
+			hits = append(hits, WatchHit{ID: w.ID, Owner: w.Owner, Note: w.Note, Once: once})
 		}
 	}
-	return Watch{}, false
+	return hits
 }
 
 // watchMatches reports whether the watch's kind-specific condition holds.
 // Thread membership is resolved by a single reply_to hop: the message is a
-// reply whose target is the thread root (v1).
-func watchMatches(w Watch, msg Msg) bool {
+// reply whose target is the thread root (v1). An unknown kind never
+// matches.
+func watchMatches(w watch.Watch, msg Msg) bool {
 	switch w.Kind {
-	case WatchKindEdge:
+	case watch.KindEdge:
 		return msg.ReplyTo != "" && msg.ReplyTo == w.ReplyTo
-	case WatchKindPattern:
+	case watch.KindPattern:
 		if patternMatches(w.Pattern, msg.Text) {
 			return true
 		}
@@ -247,7 +286,7 @@ func watchMatches(w Watch, msg Msg) bool {
 			}
 		}
 		return false
-	case WatchKindThread, WatchKindSubscription:
+	case watch.KindThread, watch.KindSubscription:
 		return msg.ReplyTo != "" && msg.ReplyTo == w.ThreadID
 	default:
 		return false

@@ -3,8 +3,12 @@ package wake
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sdougbrown/whinny/internal/watch"
 )
 
 // fixedClock is a deterministic Clock.
@@ -32,7 +36,11 @@ func historyOf(m map[string]string) HistoryLookup {
 	}
 }
 
-var testNow = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+var (
+	testNow   = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	trueBool  = true
+	falseBool = false
+)
 
 func testSelf() Self {
 	return Self{UserID: "bot1", Name: "squire", Aliases: []string{"sq"}}
@@ -130,8 +138,8 @@ func TestWatches(t *testing.T) {
 	t.Run("edge hit", func(t *testing.T) {
 		in := In{
 			Self:    self,
-			Msg:     Msg{From: human, ReplyTo: "m100"},
-			Watches: []Watch{{ID: "w1", Kind: WatchKindEdge, ReplyTo: "m100", Note: "edge note"}},
+			Msg:     Msg{RoomID: "room1", From: human, ReplyTo: "m100"},
+			Watches: []watch.Watch{{ID: "w1", RoomID: "room1", Kind: watch.KindEdge, ReplyTo: "m100", Note: "edge note"}},
 		}
 		d := Evaluate(context.Background(), in)
 		if !d.Wake || d.Kind != KindWatch || d.Reason != "edge note" {
@@ -141,8 +149,8 @@ func TestWatches(t *testing.T) {
 	t.Run("pattern hit on text", func(t *testing.T) {
 		in := In{
 			Self:    self,
-			Msg:     Msg{From: human, Text: "the DEPLOY is done"},
-			Watches: []Watch{{ID: "w1", Kind: WatchKindPattern, Pattern: "deploy", Note: "deploy note"}},
+			Msg:     Msg{RoomID: "room1", From: human, Text: "the DEPLOY is done"},
+			Watches: []watch.Watch{{ID: "w1", RoomID: "room1", Kind: watch.KindPattern, Pattern: "deploy", Note: "deploy note"}},
 		}
 		d := Evaluate(context.Background(), in)
 		if !d.Wake || d.Kind != KindWatch || d.Reason != "deploy note" {
@@ -152,8 +160,8 @@ func TestWatches(t *testing.T) {
 	t.Run("pattern hit on embed title", func(t *testing.T) {
 		in := In{
 			Self:    self,
-			Msg:     Msg{From: human, Text: "see attached", Embeds: []Embed{{Title: "DEPLOY report"}}},
-			Watches: []Watch{{ID: "w1", Kind: WatchKindPattern, Pattern: "deploy", Note: "embed note"}},
+			Msg:     Msg{RoomID: "room1", From: human, Text: "see attached", Embeds: []Embed{{Title: "DEPLOY report"}}},
+			Watches: []watch.Watch{{ID: "w1", RoomID: "room1", Kind: watch.KindPattern, Pattern: "deploy", Note: "embed note"}},
 		}
 		d := Evaluate(context.Background(), in)
 		if !d.Wake || d.Kind != KindWatch {
@@ -163,8 +171,8 @@ func TestWatches(t *testing.T) {
 	t.Run("pattern hit on embed caption", func(t *testing.T) {
 		in := In{
 			Self:    self,
-			Msg:     Msg{From: human, Text: "see attached", Embeds: []Embed{{Caption: "the deploy log"}}},
-			Watches: []Watch{{ID: "w1", Kind: WatchKindPattern, Pattern: "deploy", Note: "caption note"}},
+			Msg:     Msg{RoomID: "room1", From: human, Text: "see attached", Embeds: []Embed{{Caption: "the deploy log"}}},
+			Watches: []watch.Watch{{ID: "w1", RoomID: "room1", Kind: watch.KindPattern, Pattern: "deploy", Note: "caption note"}},
 		}
 		d := Evaluate(context.Background(), in)
 		if !d.Wake || d.Kind != KindWatch {
@@ -174,8 +182,8 @@ func TestWatches(t *testing.T) {
 	t.Run("thread match one hop", func(t *testing.T) {
 		in := In{
 			Self:    self,
-			Msg:     Msg{From: human, ReplyTo: "thread-root"},
-			Watches: []Watch{{ID: "w1", Kind: WatchKindThread, ThreadID: "thread-root", Note: "thread note"}},
+			Msg:     Msg{RoomID: "room1", From: human, ReplyTo: "thread-root"},
+			Watches: []watch.Watch{{ID: "w1", RoomID: "room1", Kind: watch.KindThread, ThreadID: "thread-root", Note: "thread note"}},
 		}
 		d := Evaluate(context.Background(), in)
 		if !d.Wake || d.Kind != KindWatch || d.Reason != "thread note" {
@@ -185,8 +193,8 @@ func TestWatches(t *testing.T) {
 	t.Run("subscription hit on human post", func(t *testing.T) {
 		in := In{
 			Self:    self,
-			Msg:     Msg{From: human, ReplyTo: "thread-root"},
-			Watches: []Watch{{ID: "w1", Kind: WatchKindSubscription, ThreadID: "thread-root", Note: "sub note"}},
+			Msg:     Msg{RoomID: "room1", From: human, ReplyTo: "thread-root"},
+			Watches: []watch.Watch{{ID: "w1", RoomID: "room1", Kind: watch.KindSubscription, ThreadID: "thread-root", Note: "sub note"}},
 		}
 		d := Evaluate(context.Background(), in)
 		if !d.Wake || d.Kind != KindWatch {
@@ -196,8 +204,8 @@ func TestWatches(t *testing.T) {
 	t.Run("subscription excludes owner own post", func(t *testing.T) {
 		in := In{
 			Self:    self,
-			Msg:     Msg{From: From{UserID: "bot1"}, ReplyTo: "thread-root"},
-			Watches: []Watch{{ID: "w1", Kind: WatchKindSubscription, ThreadID: "thread-root", Note: "sub note"}},
+			Msg:     Msg{RoomID: "room1", From: From{UserID: "bot1"}, ReplyTo: "thread-root"},
+			Watches: []watch.Watch{{ID: "w1", RoomID: "room1", Kind: watch.KindSubscription, ThreadID: "thread-root", Note: "sub note"}},
 		}
 		d := Evaluate(context.Background(), in)
 		if d.Wake {
@@ -207,8 +215,8 @@ func TestWatches(t *testing.T) {
 	t.Run("from filter mismatch", func(t *testing.T) {
 		in := In{
 			Self:    self,
-			Msg:     Msg{From: human, Text: "deploy"},
-			Watches: []Watch{{ID: "w1", Kind: WatchKindPattern, Pattern: "deploy", FromUser: "otheruser", Note: "filtered"}},
+			Msg:     Msg{RoomID: "room1", From: human, Text: "deploy"},
+			Watches: []watch.Watch{{ID: "w1", RoomID: "room1", Kind: watch.KindPattern, Pattern: "deploy", FromUser: "otheruser", Note: "filtered"}},
 		}
 		d := Evaluate(context.Background(), in)
 		if d.Wake {
@@ -218,8 +226,8 @@ func TestWatches(t *testing.T) {
 	t.Run("from filter match", func(t *testing.T) {
 		in := In{
 			Self:    self,
-			Msg:     Msg{From: human, Text: "deploy"},
-			Watches: []Watch{{ID: "w1", Kind: WatchKindPattern, Pattern: "deploy", FromUser: "human1", Note: "filtered"}},
+			Msg:     Msg{RoomID: "room1", From: human, Text: "deploy"},
+			Watches: []watch.Watch{{ID: "w1", RoomID: "room1", Kind: watch.KindPattern, Pattern: "deploy", FromUser: "human1", Note: "filtered"}},
 		}
 		d := Evaluate(context.Background(), in)
 		if !d.Wake || d.Kind != KindWatch {
@@ -229,8 +237,8 @@ func TestWatches(t *testing.T) {
 	t.Run("once watch removed", func(t *testing.T) {
 		in := In{
 			Self:    self,
-			Msg:     Msg{From: human, Text: "deploy"},
-			Watches: []Watch{{ID: "w1", Kind: WatchKindPattern, Pattern: "deploy", Once: true, Note: "once note"}},
+			Msg:     Msg{RoomID: "room1", From: human, Text: "deploy"},
+			Watches: []watch.Watch{{ID: "w1", RoomID: "room1", Kind: watch.KindPattern, Pattern: "deploy", Once: &trueBool, Note: "once note"}},
 		}
 		d := Evaluate(context.Background(), in)
 		if !d.Wake || d.Kind != KindWatch {
@@ -243,8 +251,8 @@ func TestWatches(t *testing.T) {
 	t.Run("persistent watch stays", func(t *testing.T) {
 		in := In{
 			Self:    self,
-			Msg:     Msg{From: human, Text: "deploy"},
-			Watches: []Watch{{ID: "w1", Kind: WatchKindPattern, Pattern: "deploy", Once: false, Note: "persist note"}},
+			Msg:     Msg{RoomID: "room1", From: human, Text: "deploy"},
+			Watches: []watch.Watch{{ID: "w1", RoomID: "room1", Kind: watch.KindPattern, Pattern: "deploy", Once: &falseBool, Note: "persist note"}},
 		}
 		d := Evaluate(context.Background(), in)
 		if !d.Wake || d.Kind != KindWatch {
@@ -257,12 +265,98 @@ func TestWatches(t *testing.T) {
 	t.Run("uncompileable pattern is non-match", func(t *testing.T) {
 		in := In{
 			Self:    self,
-			Msg:     Msg{From: human, Text: "deploy"},
-			Watches: []Watch{{ID: "w1", Kind: WatchKindPattern, Pattern: "(", Note: "bad"}},
+			Msg:     Msg{RoomID: "room1", From: human, Text: "deploy"},
+			Watches: []watch.Watch{{ID: "w1", RoomID: "room1", Kind: watch.KindPattern, Pattern: "(", Note: "bad"}},
 		}
 		d := Evaluate(context.Background(), in)
 		if d.Wake {
 			t.Errorf("d.Wake = true, want false (uncompileable pattern)")
+		}
+	})
+	t.Run("two once-watches both fire", func(t *testing.T) {
+		in := In{
+			Self: self,
+			Msg:  Msg{RoomID: "room1", From: human, Text: "deploy"},
+			Watches: []watch.Watch{
+				{ID: "w1", Owner: "agent-a", RoomID: "room1", Kind: watch.KindPattern, Pattern: "deploy", Once: &trueBool, Note: "first"},
+				{ID: "w2", Owner: "agent-b", RoomID: "room1", Kind: watch.KindPattern, Pattern: "deploy", Once: &trueBool, Note: "second"},
+			},
+		}
+		d := Evaluate(context.Background(), in)
+		if !d.Wake || d.Kind != KindWatch {
+			t.Fatalf("d = %+v, want wake watch", d)
+		}
+		if len(d.Watches) != 2 {
+			t.Fatalf("Watches len = %d, want 2", len(d.Watches))
+		}
+		if d.Watches[0].ID != "w1" || d.Watches[0].Owner != "agent-a" || d.Watches[0].Note != "first" {
+			t.Errorf("Watches[0] = %+v, want w1/agent-a/first", d.Watches[0])
+		}
+		if d.Watches[1].ID != "w2" || d.Watches[1].Owner != "agent-b" || d.Watches[1].Note != "second" {
+			t.Errorf("Watches[1] = %+v, want w2/agent-b/second", d.Watches[1])
+		}
+		if len(d.RemoveWatchIDs) != 2 || d.RemoveWatchIDs[0] != "w1" || d.RemoveWatchIDs[1] != "w2" {
+			t.Errorf("RemoveWatchIDs = %v, want [w1 w2]", d.RemoveWatchIDs)
+		}
+	})
+	t.Run("mixed once and persistent", func(t *testing.T) {
+		in := In{
+			Self: self,
+			Msg:  Msg{RoomID: "room1", From: human, Text: "deploy"},
+			Watches: []watch.Watch{
+				{ID: "w1", RoomID: "room1", Kind: watch.KindPattern, Pattern: "deploy", Once: &trueBool, Note: "once"},
+				{ID: "w2", RoomID: "room1", Kind: watch.KindPattern, Pattern: "deploy", Once: &falseBool, Note: "persist"},
+			},
+		}
+		d := Evaluate(context.Background(), in)
+		if len(d.Watches) != 2 {
+			t.Fatalf("Watches len = %d, want 2", len(d.Watches))
+		}
+		if len(d.RemoveWatchIDs) != 1 || d.RemoveWatchIDs[0] != "w1" {
+			t.Errorf("RemoveWatchIDs = %v, want [w1] (only the once-hit)", d.RemoveWatchIDs)
+		}
+	})
+	t.Run("empty room never matches", func(t *testing.T) {
+		in := In{
+			Self:    self,
+			Msg:     Msg{RoomID: "room1", From: human, Text: "deploy"},
+			Watches: []watch.Watch{{ID: "w1", Kind: watch.KindPattern, Pattern: "deploy", Note: "no room"}},
+		}
+		d := Evaluate(context.Background(), in)
+		if d.Wake {
+			t.Errorf("d.Wake = true, want false (empty room never matches)")
+		}
+	})
+	for _, tc := range []struct {
+		name  string
+		kind  watch.Kind
+		watch watch.Watch
+	}{
+		{"thread watch non-reply", watch.KindThread, watch.Watch{ID: "w1", RoomID: "room1", Kind: watch.KindThread, ThreadID: "thread-root", Note: "thread note"}},
+		{"edge watch non-reply", watch.KindEdge, watch.Watch{ID: "w1", RoomID: "room1", Kind: watch.KindEdge, ReplyTo: "m100", Note: "edge note"}},
+		{"subscription watch non-reply", watch.KindSubscription, watch.Watch{ID: "w1", RoomID: "room1", Kind: watch.KindSubscription, ThreadID: "thread-root", Note: "sub note"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := In{
+				Self:    self,
+				Msg:     Msg{RoomID: "room1", From: human, Text: "hello"},
+				Watches: []watch.Watch{tc.watch},
+			}
+			d := Evaluate(context.Background(), in)
+			if d.Wake {
+				t.Errorf("d.Wake = true, want false (%s, non-reply message)", tc.name)
+			}
+		})
+	}
+	t.Run("unknown kind never matches", func(t *testing.T) {
+		in := In{
+			Self:    self,
+			Msg:     Msg{RoomID: "room1", From: human, Text: "deploy", ReplyTo: "m100"},
+			Watches: []watch.Watch{{ID: "w1", RoomID: "room1", Kind: "bogus", Pattern: "deploy", ReplyTo: "m100", ThreadID: "m100", Note: "bogus"}},
+		}
+		d := Evaluate(context.Background(), in)
+		if d.Wake {
+			t.Errorf("d.Wake = true, want false (unknown kind)")
 		}
 	})
 }
@@ -284,6 +378,30 @@ func TestFirebreak(t *testing.T) {
 	}
 	if classifier.calls != 0 {
 		t.Errorf("classifier.calls = %d, want 0 (not called)", classifier.calls)
+	}
+}
+
+func TestBotWatchMatch(t *testing.T) {
+	self := testSelf()
+	classifier := &stubClassifier{directed: true}
+	in := In{
+		Self:       self,
+		Msg:        Msg{RoomID: "room1", From: From{UserID: "bot2", Name: "otherbot"}, Text: "the DEPLOY is done"},
+		Peers:      Peers{"bot2": {Name: "otherbot", IsBot: true}},
+		Watches:    []watch.Watch{{ID: "w1", Owner: "agent-a", RoomID: "room1", Kind: watch.KindPattern, Pattern: "deploy", Note: "bot watch"}},
+		Classifier: classifier,
+		Gate:       NewAmbientGate(time.Minute, 10),
+		Clock:      fixedClock{t: testNow},
+	}
+	d := Evaluate(context.Background(), in)
+	if !d.Wake || d.Kind != KindWatch {
+		t.Errorf("d = %+v, want wake watch (bot watch match)", d)
+	}
+	if len(d.Watches) != 1 || d.Watches[0].Owner != "agent-a" {
+		t.Errorf("Watches = %v, want one hit owned by agent-a", d.Watches)
+	}
+	if classifier.calls != 0 {
+		t.Errorf("classifier.calls = %d, want 0 (bots never reach the ambient gate)", classifier.calls)
 	}
 }
 
@@ -325,7 +443,9 @@ func TestAmbient(t *testing.T) {
 	t.Run("valve spacing blocks", func(t *testing.T) {
 		classifier := &stubClassifier{directed: true}
 		gate := NewAmbientGate(5*time.Minute, 10)
-		gate.Record(testNow)
+		if !gate.TryReserve(testNow) {
+			t.Fatal("pre-reserve failed")
+		}
 		in := In{
 			Self:       self,
 			Msg:        Msg{From: human, Text: "hello"},
@@ -346,7 +466,9 @@ func TestAmbient(t *testing.T) {
 		classifier := &stubClassifier{directed: true}
 		gate := NewAmbientGate(0, maxPerHour)
 		for i := 0; i < maxPerHour; i++ {
-			gate.Record(testNow.Add(time.Duration(i) * time.Minute))
+			if !gate.TryReserve(testNow.Add(time.Duration(i) * time.Minute)) {
+				t.Fatalf("pre-reserve %d failed", i)
+			}
 		}
 		in := In{
 			Self:       self,
@@ -363,7 +485,7 @@ func TestAmbient(t *testing.T) {
 			t.Errorf("classifier.calls = %d, want 0 (cap blocks before classifier)", classifier.calls)
 		}
 	})
-	t.Run("classifier false no wake no record", func(t *testing.T) {
+	t.Run("classifier false no wake reservation released", func(t *testing.T) {
 		classifier := &stubClassifier{directed: false}
 		gate := NewAmbientGate(5*time.Minute, 10)
 		in := In{
@@ -377,14 +499,26 @@ func TestAmbient(t *testing.T) {
 		if d.Wake {
 			t.Errorf("d.Wake = true, want false (classifier false)")
 		}
-		// State not recorded: flip the classifier to true; the immediate
-		// follow-up is still allowed by the valve and wakes.
+		// The reservation was released: flip the classifier to true; the
+		// immediate follow-up is still allowed by the valve and wakes.
 		classifier.directed = true
 		in2 := in
 		in2.Clock = fixedClock{t: testNow.Add(10 * time.Second)}
 		d2 := Evaluate(context.Background(), in2)
 		if !d2.Wake || d2.Kind != KindAmbient {
-			t.Errorf("d2 = %+v, want wake ambient (state not recorded)", d2)
+			t.Errorf("d2 = %+v, want wake ambient (reservation released)", d2)
+		}
+	})
+	t.Run("nil classifier no ambient wake", func(t *testing.T) {
+		in := In{
+			Self:  self,
+			Msg:   Msg{From: human, Text: "hello"},
+			Gate:  NewAmbientGate(time.Minute, 10),
+			Clock: fixedClock{t: testNow},
+		}
+		d := Evaluate(context.Background(), in)
+		if d.Wake {
+			t.Errorf("d.Wake = true, want false (nil classifier)")
 		}
 	})
 }
@@ -395,7 +529,7 @@ func TestOrderingMentionBeatsWatch(t *testing.T) {
 	in := In{
 		Self:    self,
 		Msg:     Msg{From: human, Text: "squire, deploy"},
-		Watches: []Watch{{ID: "w1", Kind: WatchKindPattern, Pattern: "deploy", Once: true, Note: "watch note"}},
+		Watches: []watch.Watch{{ID: "w1", RoomID: "room1", Kind: watch.KindPattern, Pattern: "deploy", Once: &trueBool, Note: "watch note"}},
 	}
 	d := Evaluate(context.Background(), in)
 	if d.Kind != KindMention {
@@ -405,12 +539,12 @@ func TestOrderingMentionBeatsWatch(t *testing.T) {
 		t.Errorf("d.Wake = false, want true")
 	}
 	if len(d.RemoveWatchIDs) != 0 {
-		t.Errorf("RemoveWatchIDs = %v, want empty (watch not consumed)", d.RemoveWatchIDs)
+		t.Errorf("RemoveWatchIDs = %v, want empty (mention short-circuits before watch matching)", d.RemoveWatchIDs)
 	}
 }
 
 func TestExpiryDecision(t *testing.T) {
-	w := Watch{ID: "w1", Note: "deploy note"}
+	w := watch.Watch{ID: "w1", Note: "deploy note"}
 	d := ExpiryDecision(w)
 	if !d.Wake || d.Kind != KindWatch {
 		t.Errorf("d = %+v, want wake watch", d)
@@ -423,33 +557,82 @@ func TestExpiryDecision(t *testing.T) {
 func TestAmbientGateValves(t *testing.T) {
 	t.Run("fresh gate allows", func(t *testing.T) {
 		g := NewAmbientGate(5*time.Minute, 10)
-		if !g.Allow(testNow) {
-			t.Errorf("Allow = false, want true (fresh)")
+		if !g.TryReserve(testNow) {
+			t.Errorf("TryReserve = false, want true (fresh)")
 		}
 	})
 	t.Run("spacing blocks then allows at boundary", func(t *testing.T) {
 		g := NewAmbientGate(5*time.Minute, 10)
-		g.Record(testNow)
-		if g.Allow(testNow.Add(4 * time.Minute)) {
-			t.Errorf("Allow = true, want false (within spacing)")
+		if !g.TryReserve(testNow) {
+			t.Fatal("first TryReserve = false, want true")
 		}
-		if !g.Allow(testNow.Add(5 * time.Minute)) {
-			t.Errorf("Allow = false, want true (at spacing boundary)")
+		if g.TryReserve(testNow.Add(4 * time.Minute)) {
+			t.Errorf("TryReserve = true, want false (within spacing)")
+		}
+		if !g.TryReserve(testNow.Add(5 * time.Minute)) {
+			t.Errorf("TryReserve = false, want true (at spacing boundary)")
 		}
 	})
 	t.Run("cap blocks at N", func(t *testing.T) {
 		g := NewAmbientGate(0, 2)
-		g.Record(testNow)
-		g.Record(testNow.Add(time.Minute))
-		if g.Allow(testNow.Add(2 * time.Minute)) {
-			t.Errorf("Allow = true, want false (cap reached)")
+		if !g.TryReserve(testNow) {
+			t.Fatal("first TryReserve = false, want true")
+		}
+		if !g.TryReserve(testNow.Add(time.Minute)) {
+			t.Fatal("second TryReserve = false, want true")
+		}
+		if g.TryReserve(testNow.Add(2 * time.Minute)) {
+			t.Errorf("TryReserve = true, want false (cap reached)")
 		}
 	})
 	t.Run("cap window expires", func(t *testing.T) {
 		g := NewAmbientGate(0, 1)
-		g.Record(testNow)
-		if !g.Allow(testNow.Add(time.Hour + time.Second)) {
-			t.Errorf("Allow = false, want true (window expired)")
+		if !g.TryReserve(testNow) {
+			t.Fatal("TryReserve = false, want true")
+		}
+		if !g.TryReserve(testNow.Add(time.Hour + time.Second)) {
+			t.Errorf("TryReserve = false, want true (window expired)")
 		}
 	})
+	t.Run("negative cap denies all", func(t *testing.T) {
+		g := NewAmbientGate(0, -1)
+		if g.TryReserve(testNow) {
+			t.Errorf("TryReserve = true, want false (negative cap)")
+		}
+	})
+}
+
+// TestAmbientGateConcurrent: concurrent TryReserves never exceed the
+// valves.
+func TestAmbientGateConcurrent(t *testing.T) {
+	const maxPerHour = 3
+	g := NewAmbientGate(0, maxPerHour)
+	var wg sync.WaitGroup
+	var allowed int64
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if g.TryReserve(testNow) {
+				atomic.AddInt64(&allowed, 1)
+			}
+		}()
+	}
+	wg.Wait()
+	if allowed > maxPerHour {
+		t.Errorf("allowed = %d, want <= %d", allowed, maxPerHour)
+	}
+}
+
+// TestAmbientGateReleaseRestores: a released reservation frees both the
+// spacing and the cap for the next TryReserve.
+func TestAmbientGateReleaseRestores(t *testing.T) {
+	g := NewAmbientGate(0, 1)
+	if !g.TryReserve(testNow) {
+		t.Fatal("first TryReserve = false, want true")
+	}
+	g.Release(testNow)
+	if !g.TryReserve(testNow) {
+		t.Fatal("TryReserve after Release = false, want true (state restored)")
+	}
 }
