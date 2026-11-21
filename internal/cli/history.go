@@ -10,6 +10,10 @@ import (
 	"github.com/sdougbrown/whinny/internal/apronws"
 )
 
+// DefaultHistoryLimit is the history limit when --limit is omitted or
+// non-positive.
+const DefaultHistoryLimit = 50
+
 // historyMessage is one history message's JSON projection.
 type historyMessage struct {
 	MessageID string       `json:"message_id"`
@@ -43,7 +47,7 @@ func HistoryHandler(d Deps) clicontract.HandleFunc {
 		}
 		limit := inv.Ints["limit"]
 		if limit <= 0 {
-			limit = 50
+			limit = DefaultHistoryLimit
 		}
 		h, err := client.History(ctx, apronws.HistoryParams{RoomID: room.ID, Limit: limit})
 		if err != nil {

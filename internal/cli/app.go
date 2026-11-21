@@ -126,7 +126,7 @@ func App(d Deps) *clicontract.App {
 				Short: "print a room's recent messages",
 				Flags: []clicontract.Flag{
 					{Name: "room", Kind: clicontract.String, Required: true, Usage: "room id or title"},
-					{Name: "limit", Kind: clicontract.Int, Default: 50, Usage: "maximum messages to fetch (default 50)"},
+					{Name: "limit", Kind: clicontract.Int, Default: DefaultHistoryLimit, Usage: fmt.Sprintf("maximum messages to fetch (default %d)", DefaultHistoryLimit)},
 					{Name: "before", Kind: clicontract.String, Usage: "message_id cursor: only messages strictly older than it"},
 					{Name: "since", Kind: clicontract.String, Usage: "message_id cursor: only messages strictly newer than it"},
 					{Name: "json", Kind: clicontract.Bool, Usage: "print the messages as a JSON array"},
@@ -191,7 +191,7 @@ func App(d Deps) *clicontract.App {
 					"--for sets the duration (default 8h); --for 0 is indefinite (a large sentinel). " +
 					"Records keep flowing; quiet only gates sends. Use `whinny resume` to clear.",
 				Flags: []clicontract.Flag{
-					{Name: "for", Kind: clicontract.Duration, Default: 8 * time.Hour, Usage: "quiet duration (default 8h; 0 = indefinite)"},
+					{Name: "for", Kind: clicontract.Duration, Default: DefaultQuietDuration, Usage: fmt.Sprintf("quiet duration (default %dh; 0 = indefinite)", int(DefaultQuietDuration.Hours()))},
 				},
 				Output: clicontract.Output{Mode: clicontract.OutputRaw, SuccessExitCodes: []int{0}},
 				Handle: QuietHandler(d),
