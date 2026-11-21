@@ -277,3 +277,44 @@ func TestBreakerClear(t *testing.T) {
 		t.Fatalf("posts = %d, want 1 (the post after the clear)", len(c.posts))
 	}
 }
+
+// TestPostRoomResolutionErrorDoesNotBump: a misspelled room is a usage
+// error the caller can fix — it refunds without advancing the failure
+// counter, so it can never contribute to a breaker trip.
+func TestPostRoomResolutionErrorDoesNotBump(t *testing.T) {
+	c := &fakeClient{
+		joined:  []apronws.Room{{ID: "r1", Title: "General"}},
+		postErr: errors.New("send failed"),
+	}
+	d := postDeps(t, c)
+	now := time.Unix(2_000_000, 0)
+	d.Now = func() time.Time { return now }
+
+	badRoom := func() error {
+		_, err := PostHandler(d)(context.Background(),
+			inv("post", []string{"hello"}, map[string]string{"room": "nope"}, nil), io.Discard)
+		return err
+	}
+	for i := 1; i <= 6; i++ {
+		err := badRoom()
+		if err == nil || !strings.Contains(err.Error(), "nope") {
+			t.Fatalf("bad-room post %d err = %v, want the resolution error", i, err)
+		}
+	}
+
+	// The counter is still at zero: five real post failures are needed
+	// to trip, proving the resolution errors never counted.
+	for i := 1; i <= 4; i++ {
+		err := postOnce(t, d)
+		if err == nil || !strings.Contains(err.Error(), "send failed") {
+			t.Fatalf("failing post %d err = %v, want the transport error", i, err)
+		}
+	}
+	err := postOnce(t, d)
+	if err == nil || !strings.Contains(err.Error(), "refused-breaker") {
+		t.Fatalf("failing post 5 err = %v, want the trip to refuse with refused-breaker", err)
+	}
+	if len(c.posts) != 0 {
+		t.Fatalf("posts = %d, want 0", len(c.posts))
+	}
+}

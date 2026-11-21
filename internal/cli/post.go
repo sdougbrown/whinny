@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -98,7 +99,15 @@ func PostHandler(d Deps) clicontract.HandleFunc {
 		}
 		room, err := ResolveRoom(rooms.Joined, rooms.NotJoined, inv.Flags["room"])
 		if err != nil {
-			return failSend(err)
+			// A room-resolution failure is a usage error the caller can
+			// fix from the message (room.go), not a bad send outcome —
+			// refund without counting it toward the breaker.
+			bucket.Refund()
+			var re *RoomError
+			if errors.As(err, &re) {
+				return nil, err
+			}
+			return failSend(OperationalErrorf("resolve room: %v", err))
 		}
 		postRoom := room.ID
 		var outRoomID string
