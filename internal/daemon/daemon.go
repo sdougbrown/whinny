@@ -97,6 +97,10 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 			return err
 		}
 		defer client.Close()
+		// The connection is authenticated at this point, so pushes for the
+		// bot's rooms arrive from here on. Operators and scripts wait on
+		// this line to know the daemon is live.
+		log.Printf("daemon: connected to %s", cfg.URL)
 	}
 
 	d := &daemon{
