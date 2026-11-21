@@ -13,235 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coder/websocket"
 	"github.com/sdougbrown/whinny/internal/apronws"
+	"github.com/sdougbrown/whinny/internal/apronws/apronfake"
 	"github.com/sdougbrown/whinny/internal/store"
 	"github.com/sdougbrown/whinny/internal/wake"
 )
-
-// --- fake apron WebSocket server (adapted from the apronws test fake) ---
-
-type frame struct {
-	ID     string          `json:"id"`
-	Method string          `json:"method"`
-	Params json.RawMessage `json:"params"`
-	Result json.RawMessage `json:"result"`
-	Error  json.RawMessage `json:"error"`
-	Data   json.RawMessage `json:"data"`
-}
-
-type serverConn struct {
-	conn   *websocket.Conn
-	send   chan []byte
-	recv   chan []byte
-	closed chan struct{}
-}
-
-type fakeServer struct {
-	ts    *httptest.Server
-	mu    sync.Mutex
-	conns []*serverConn
-	newC  chan struct{}
-	// joinedRooms is the room_list response's joined list; nil means
-	// none (the catch-up finds no rooms to replay).
-	joinedRooms []map[string]any
-	// historyByRoom is the history response's messages, keyed by room
-	// id; a missing room yields an empty list.
-	historyByRoom map[string][]map[string]any
-	// historyGate, when non-nil, blocks the history response until it
-	// is closed: a test holds the replay to simulate a live push
-	// landing between the reconnect and the history response.
-	historyGate chan struct{}
-	// historyGateHit, when non-nil, is signaled (non-blocking) when a
-	// history request reaches the gate.
-	historyGateHit chan struct{}
-	// historyFailures, when > 0, makes the next N history requests
-	// fail with an error frame (a flaky-transport simulation).
-	historyFailures int
-}
-
-func newFakeServer(t *testing.T) *fakeServer {
-	f := &fakeServer{newC: make(chan struct{}, 16)}
-	f.ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := websocket.Accept(w, r, nil)
-		if err != nil {
-			return
-		}
-		fc := &serverConn{
-			conn:   conn,
-			send:   make(chan []byte, 16),
-			recv:   make(chan []byte, 16),
-			closed: make(chan struct{}),
-		}
-		f.mu.Lock()
-		f.conns = append(f.conns, fc)
-		f.mu.Unlock()
-		f.newC <- struct{}{}
-		f.run(fc)
-	}))
-	t.Cleanup(f.ts.Close)
-	return f
-}
-
-// connAt waits for the n-th accepted connection (1-indexed) and returns
-// it.
-func (f *fakeServer) connAt(t *testing.T, n int) *serverConn {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	for {
-		f.mu.Lock()
-		cnt := len(f.conns)
-		var fc *serverConn
-		if cnt >= n {
-			fc = f.conns[n-1]
-		}
-		f.mu.Unlock()
-		if fc != nil {
-			return fc
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatalf("timed out waiting for connection %d", n)
-		case <-f.newC:
-		}
-	}
-}
-
-func (f *fakeServer) run(fc *serverConn) {
-	defer close(fc.closed)
-	for {
-		typ, data, err := fc.conn.Read(context.Background())
-		if err != nil {
-			return
-		}
-		if typ != websocket.MessageText {
-			continue
-		}
-		var fr frame
-		if json.Unmarshal(data, &fr) != nil {
-			continue
-		}
-		switch fr.Method {
-		case "ping":
-			pong, _ := json.Marshal(map[string]any{"method": "pong"})
-			fc.write(pong)
-		case "room_list":
-			f.mu.Lock()
-			joined := f.joinedRooms
-			f.mu.Unlock()
-			if joined == nil {
-				joined = []map[string]any{}
-			}
-			reply, _ := json.Marshal(map[string]any{"id": fr.ID, "result": map[string]any{"joined": joined}})
-			fc.write(reply)
-		case "history":
-			var p struct {
-				RoomID string `json:"room_id"`
-			}
-			_ = json.Unmarshal(fr.Params, &p)
-			f.mu.Lock()
-			msgs := f.historyByRoom[p.RoomID]
-			gate := f.historyGate
-			fail := f.historyFailures > 0
-			if fail {
-				f.historyFailures--
-			}
-			f.mu.Unlock()
-			if fail {
-				errReply, _ := json.Marshal(map[string]any{"id": fr.ID, "error": map[string]any{"code": -32000, "message": "history flake"}})
-				fc.write(errReply)
-				continue
-			}
-			if gate != nil {
-				select {
-				case f.historyGateHit <- struct{}{}:
-				default:
-				}
-				<-gate
-			}
-			if msgs == nil {
-				msgs = []map[string]any{}
-			}
-			reply, _ := json.Marshal(map[string]any{"id": fr.ID, "result": map[string]any{"messages": msgs, "latest_log_id": "0"}})
-			fc.write(reply)
-		}
-		select {
-		case fc.recv <- data:
-		default:
-		}
-	}
-}
-
-func (fc *serverConn) write(b []byte) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = fc.conn.Write(ctx, websocket.MessageText, b)
-}
-
-// handshake plays the server half of the apron handshake.
-func (fc *serverConn) handshake() error {
-	server, _ := json.Marshal(map[string]any{
-		"method": "server",
-		"params": map[string]any{"apron": 9, "agent": "fake", "ping": 30},
-	})
-	fc.write(server)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	for {
-		select {
-		case b := <-fc.recv:
-			var fr frame
-			if json.Unmarshal(b, &fr) != nil || fr.Method != "auth" {
-				continue
-			}
-			reply, _ := json.Marshal(map[string]any{
-				"id":     fr.ID,
-				"result": map[string]any{"you": map[string]any{"user_id": "u9"}, "token": "tok-2"},
-			})
-			fc.write(reply)
-			return nil
-		case <-ctx.Done():
-			return errors.New("timed out waiting for auth")
-		}
-	}
-}
-
-// push sends a push frame to the client.
-func (fc *serverConn) push(method string, payload any) {
-	b, _ := json.Marshal(map[string]any{"method": method, "params": payload})
-	fc.write(b)
-}
-
-// pushMessage sends a message push.
-func (fc *serverConn) pushMessage(id, room, from, text string, mentions []string) {
-	body := map[string]any{"text": text}
-	if mentions != nil {
-		body["mentions"] = mentions
-	}
-	fc.push("message", map[string]any{
-		"message_id": id,
-		"log_id":     time.Now().UnixNano(),
-		"room_id":    room,
-		"from":       map[string]any{"user_id": from, "name": from},
-		"body":       body,
-	})
-}
-
-// pushMessageAt sends a message push with an explicit log id.
-func (fc *serverConn) pushMessageAt(id, room, from, text string, mentions []string, logID int64) {
-	body := map[string]any{"text": text}
-	if mentions != nil {
-		body["mentions"] = mentions
-	}
-	fc.push("message", map[string]any{
-		"message_id": id,
-		"log_id":     logID,
-		"room_id":    room,
-		"from":       map[string]any{"user_id": from, "name": from},
-		"body":       body,
-	})
-}
 
 // --- fakes for the daemon's dependencies ---
 
@@ -372,11 +148,21 @@ func (t *testTicker) C() <-chan time.Time { return t.c }
 func (t *testTicker) Stop()               {}
 func (t *testTicker) fire()               { t.c <- time.Now() }
 
+// serverHandshake plays the server half of the apron handshake on fc
+// (you is u9, matching baseCfg's Self), bounded at 10s.
+func serverHandshake(t *testing.T, fc *apronfake.Conn) error {
+	t.Helper()
+	fc.YouUserID = "u9"
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return fc.Handshake(ctx, 30)
+}
+
 // --- harness ---
 
 type harness struct {
-	srv    *fakeServer
-	fc     *serverConn
+	srv    *apronfake.Server
+	fc     *apronfake.Conn
 	dlv    *fakeDeliverer
 	clock  *fakeClock
 	ticker *testTicker
@@ -396,16 +182,18 @@ func startHarness(t *testing.T, cfg Config) *harness {
 // deliverer (the harness's fakeDeliverer is not wired in).
 func startHarnessWithDeliverer(t *testing.T, cfg Config, custom Deliverer) *harness {
 	t.Helper()
+	srv := apronfake.New(t)
+	srv.AutoRespond = true
 	h := &harness{
-		srv:    newFakeServer(t),
+		srv:    srv,
 		dlv:    newFakeDeliverer(),
 		clock:  newFakeClock(),
 		ticker: newTestTicker(),
 		done:   make(chan error, 1),
 	}
 	errC := make(chan error, 1)
-	go func() { errC <- h.srv.connAt(t, 1).handshake() }()
-	client, err := apronws.Connect(context.Background(), apronws.Options{URL: h.srv.ts.URL, Token: "test-token"})
+	go func() { errC <- serverHandshake(t, h.srv.ConnAt(t, 1)) }()
+	client, err := apronws.Connect(context.Background(), apronws.Options{URL: h.srv.WSURL(), Token: "test-token"})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -413,7 +201,7 @@ func startHarnessWithDeliverer(t *testing.T, cfg Config, custom Deliverer) *harn
 	if err := <-errC; err != nil {
 		t.Fatalf("server handshake: %v", err)
 	}
-	h.fc = h.srv.connAt(t, 1)
+	h.fc = h.srv.ConnAt(t, 1)
 
 	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
@@ -508,7 +296,7 @@ func waitCursor(t *testing.T, h *harness, logID int64) {
 func waitSettled(t *testing.T, h *harness, want int, why string) {
 	t.Helper()
 	const flushLog int64 = 990001
-	h.fc.pushMessageAt("flush", "r1", "doug", "room noise", nil, flushLog)
+	h.fc.PushMessageAt("flush", "r1", "doug", "room noise", nil, flushLog)
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		cursor, err := h.st.GetCursor(context.Background(), "r1")
@@ -531,7 +319,7 @@ func TestRunMentionWake(t *testing.T) {
 	cfg := baseCfg()
 	h := startHarness(t, cfg)
 
-	h.fc.pushMessage("m1", "r1", "doug", "squire can you look at the roster", []string{"u9"})
+	h.fc.PushMessage("m1", "r1", "doug", "squire can you look at the roster", []string{"u9"})
 	d := h.dlv.wait(t)
 	if d.agent != "squire" {
 		t.Errorf("agent = %q, want squire", d.agent)
@@ -569,7 +357,7 @@ func TestRunWatchHitFiresAndOnceWatchDeleted(t *testing.T) {
 		t.Fatalf("add watch: %v", err)
 	}
 
-	h.fc.pushMessage("m1", "r1", "doug", "time to deploy", nil)
+	h.fc.PushMessage("m1", "r1", "doug", "time to deploy", nil)
 	d := h.dlv.wait(t)
 	if d.agent != "squire" {
 		t.Errorf("agent = %q, want squire", d.agent)
@@ -589,7 +377,7 @@ func TestRunBotSenderNonMentionIgnored(t *testing.T) {
 	cfg := baseCfg()
 	h := startHarness(t, cfg)
 
-	h.fc.pushMessage("m1", "r1", "b1", "umpire noise, no mention", nil)
+	h.fc.PushMessage("m1", "r1", "b1", "umpire noise, no mention", nil)
 	waitSettled(t, h, 0, "bot message must not wake")
 	h.stop(t)
 }
@@ -610,7 +398,7 @@ func TestRunAmbientValves(t *testing.T) {
 	}
 	h := startHarness(t, cfg)
 
-	h.fc.pushMessage("a1", "r1", "doug", "anyone around?", nil)
+	h.fc.PushMessage("a1", "r1", "doug", "anyone around?", nil)
 	d := h.dlv.wait(t)
 	if !strings.Contains(d.env.Text, "kind=ambient") {
 		t.Errorf("first ambient = %q", d.env.Text)
@@ -618,12 +406,12 @@ func TestRunAmbientValves(t *testing.T) {
 
 	// Inside the min spacing: no ambient wake.
 	h.clock.Advance(time.Minute)
-	h.fc.pushMessage("a2", "r1", "doug", "still there?", nil)
+	h.fc.PushMessage("a2", "r1", "doug", "still there?", nil)
 	waitSettled(t, h, 1, "spacing valve")
 
 	// Outside spacing (2nd wake of the hour, cap 2): fires.
 	h.clock.Advance(20 * time.Minute)
-	h.fc.pushMessage("a3", "r1", "doug", "third ask", nil)
+	h.fc.PushMessage("a3", "r1", "doug", "third ask", nil)
 	d = h.dlv.wait(t)
 	if !strings.Contains(d.env.Text, "kind=ambient") {
 		t.Errorf("second ambient = %q", d.env.Text)
@@ -632,12 +420,12 @@ func TestRunAmbientValves(t *testing.T) {
 	// Both valves' wakes are inside the trailing hour now: the per-hour
 	// cap blocks the next one.
 	h.clock.Advance(10 * time.Minute)
-	h.fc.pushMessage("a4", "r1", "doug", "fourth ask", nil)
+	h.fc.PushMessage("a4", "r1", "doug", "fourth ask", nil)
 	waitSettled(t, h, 2, "per-hour valve")
 
 	// An hour later the cap window has passed: ambient fires again.
 	h.clock.Advance(time.Hour)
-	h.fc.pushMessage("a5", "r1", "doug", "much later", nil)
+	h.fc.PushMessage("a5", "r1", "doug", "much later", nil)
 	d = h.dlv.wait(t)
 	if !strings.Contains(d.env.Text, "kind=ambient") {
 		t.Errorf("post-window ambient = %q", d.env.Text)
@@ -679,7 +467,7 @@ func TestSelfPostSubscription(t *testing.T) {
 	cfg := baseCfg()
 	h := startHarness(t, cfg)
 
-	h.fc.push("message", map[string]any{
+	h.fc.Push("message", map[string]any{
 		"message_id": "m1", "log_id": 7, "room_id": "r1",
 		"from":     map[string]any{"user_id": "u9", "name": "squire"},
 		"body":     map[string]any{"text": "starting the release thread"},
@@ -688,7 +476,7 @@ func TestSelfPostSubscription(t *testing.T) {
 
 	// Deterministic wait: a mention wake proves the record was consumed;
 	// the subscription watch must exist by then.
-	h.fc.pushMessage("m2", "r1", "doug", "ping", []string{"u9"})
+	h.fc.PushMessage("m2", "r1", "doug", "ping", []string{"u9"})
 	h.dlv.wait(t)
 
 	ws, err := h.st.ListWatches(context.Background())
@@ -712,13 +500,13 @@ func TestSelfPostSubscriptionDisabledByMeta(t *testing.T) {
 		t.Fatalf("set meta: %v", err)
 	}
 
-	h.fc.push("message", map[string]any{
+	h.fc.Push("message", map[string]any{
 		"message_id": "m1", "log_id": 7, "room_id": "r1",
 		"from":     map[string]any{"user_id": "u9", "name": "squire"},
 		"body":     map[string]any{"text": "thread post"},
 		"reply_to": map[string]any{"message_id": "root1"},
 	})
-	h.fc.pushMessageAt("m2", "r1", "doug", "ping", []string{"u9"}, 990002)
+	h.fc.PushMessageAt("m2", "r1", "doug", "ping", []string{"u9"}, 990002)
 	waitCursor(t, h, 990002)
 
 	ws, _ := h.st.ListWatches(context.Background())
@@ -751,7 +539,7 @@ func TestSharedModeRoutesWatchToOwnerCallback(t *testing.T) {
 	}
 
 	// A bot's message: watches still apply in shared mode.
-	h.fc.pushMessage("m1", "r1", "b1", "time to deploy", nil)
+	h.fc.PushMessage("m1", "r1", "b1", "time to deploy", nil)
 
 	deadline := time.Now().Add(10 * time.Second)
 	var got []byte
@@ -792,7 +580,7 @@ func TestSharedModeSkipsOwnerWithoutCallback(t *testing.T) {
 		t.Fatalf("add watch: %v", err)
 	}
 
-	h.fc.pushMessage("m1", "r1", "doug", "the release is out", nil)
+	h.fc.PushMessage("m1", "r1", "doug", "the release is out", nil)
 	waitSettled(t, h, 0, "owner without a callback must not fire in shared mode")
 	// The once-watch is not consumed.
 	ws, _ := h.st.ListWatches(context.Background())
@@ -950,10 +738,10 @@ func TestRestartDrainsQueuedWake(t *testing.T) {
 	// Start a second daemon run over the same store.
 	h2 := &harness{srv: h.srv, dlv: newFakeDeliverer(), clock: h.clock, ticker: newTestTicker(), st: h.st, done: make(chan error, 1)}
 	errC2 := make(chan error, 1)
-	go func() { errC2 <- h2.srv.connAt(t, 2).handshake() }()
+	go func() { errC2 <- serverHandshake(t, h2.srv.ConnAt(t, 2)) }()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client, err := apronws.Connect(ctx, apronws.Options{URL: h.srv.ts.URL, Token: "test-token"})
+	client, err := apronws.Connect(ctx, apronws.Options{URL: h.srv.WSURL(), Token: "test-token"})
 	if err != nil {
 		t.Fatalf("reconnect: %v", err)
 	}
@@ -961,7 +749,7 @@ func TestRestartDrainsQueuedWake(t *testing.T) {
 	if err := <-errC2; err != nil {
 		t.Fatalf("server handshake: %v", err)
 	}
-	h2.fc = h2.srv.connAt(t, 2)
+	h2.fc = h2.srv.ConnAt(t, 2)
 	go func() {
 		h2.done <- Run(ctx, cfg, Deps{Client: client, Store: h2.st, Deliver: h2.dlv, Clock: h2.clock, Now: h2.clock.Now,
 			Ticker: func(time.Duration) Ticker { return h2.ticker }})
@@ -1027,38 +815,23 @@ func TestRunValidatesBackendBeforeConnect(t *testing.T) {
 	}
 }
 
-// setCatchUp configures the fake server's room_list and history
-// responses for the catch-up.
-func (f *fakeServer) setCatchUp(rooms []map[string]any, historyByRoom map[string][]map[string]any) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.joinedRooms = rooms
-	f.historyByRoom = historyByRoom
-}
-
-// setHistoryFailures makes the next n history requests fail with an
-// error frame.
-func (f *fakeServer) setHistoryFailures(n int) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.historyFailures = n
-}
-
 // startHarnessWithSetup is like startHarness but calls setup (to
 // configure the fake server) after the client connects and before Run
 // starts, so the startup catch-up sees the configured responses.
 func startHarnessWithSetup(t *testing.T, cfg Config, setup func(*harness)) *harness {
 	t.Helper()
+	srv := apronfake.New(t)
+	srv.AutoRespond = true
 	h := &harness{
-		srv:    newFakeServer(t),
+		srv:    srv,
 		dlv:    newFakeDeliverer(),
 		clock:  newFakeClock(),
 		ticker: newTestTicker(),
 		done:   make(chan error, 1),
 	}
 	errC := make(chan error, 1)
-	go func() { errC <- h.srv.connAt(t, 1).handshake() }()
-	client, err := apronws.Connect(context.Background(), apronws.Options{URL: h.srv.ts.URL, Token: "test-token"})
+	go func() { errC <- serverHandshake(t, h.srv.ConnAt(t, 1)) }()
+	client, err := apronws.Connect(context.Background(), apronws.Options{URL: h.srv.WSURL(), Token: "test-token"})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -1066,7 +839,7 @@ func startHarnessWithSetup(t *testing.T, cfg Config, setup func(*harness)) *harn
 	if err := <-errC; err != nil {
 		t.Fatalf("server handshake: %v", err)
 	}
-	h.fc = h.srv.connAt(t, 1)
+	h.fc = h.srv.ConnAt(t, 1)
 
 	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
@@ -1145,7 +918,7 @@ func TestResidentSkipsForeignOwnerWatch(t *testing.T) {
 
 	// A message that would match the foreign watch: no wake (the watch
 	// is skipped).
-	h.fc.pushMessage("m1", "r1", "doug", "time to deploy", nil)
+	h.fc.PushMessage("m1", "r1", "doug", "time to deploy", nil)
 	waitSettled(t, h, 0, "foreign-owner watch must not fire in resident mode")
 	// The foreign watch is still in the store (not consumed).
 	ws, _ := h.st.ListWatches(context.Background())
@@ -1165,7 +938,7 @@ func TestCatchUpOnStartReplaysMissedMessages(t *testing.T) {
 			t.Fatalf("set cursor: %v", err)
 		}
 		// Room r1 is joined; the history has a missed mention at log 6.
-		h.srv.setCatchUp(
+		h.srv.SetCatchUp(
 			[]map[string]any{{"room_id": "r1"}},
 			map[string][]map[string]any{
 				"r1": {{
@@ -1201,7 +974,7 @@ func TestCatchUpOnReconnect(t *testing.T) {
 	if err := h.st.SetCursor(context.Background(), "r1", 5); err != nil {
 		t.Fatalf("set cursor: %v", err)
 	}
-	h.srv.setCatchUp(
+	h.srv.SetCatchUp(
 		[]map[string]any{{"room_id": "r1"}},
 		map[string][]map[string]any{
 			"r1": {{
@@ -1214,17 +987,16 @@ func TestCatchUpOnReconnect(t *testing.T) {
 	)
 
 	// Force a reconnect: the client's OnReconnect fires the catch-up.
-	fc1 := h.srv.connAt(t, 1)
-	fc1.conn.CloseNow()
-	select {
-	case <-fc1.closed:
-	case <-time.After(10 * time.Second):
-		t.Fatal("timed out waiting for connection close")
+	fc1 := h.srv.ConnAt(t, 1)
+	fc1.Close()
+	if err := fc1.WaitForClose(); err != nil {
+		t.Fatal(err)
 	}
 	// The replacement connection handshakes.
 	go func() {
-		fc2 := h.srv.connAt(t, 2)
-		if err := fc2.handshake(); err != nil {
+		fc2 := h.srv.ConnAt(t, 2)
+		fc2.WantToken = "tok-2" // the client re-auths with the rotated token
+		if err := serverHandshake(t, fc2); err != nil {
 			t.Error(err)
 		}
 	}()
@@ -1248,7 +1020,7 @@ func TestDedupeSkipsLiveMessageAtCursor(t *testing.T) {
 	if err := h.st.SetCursor(context.Background(), "r1", 5); err != nil {
 		t.Fatalf("set cursor: %v", err)
 	}
-	h.fc.pushMessageAt("m5", "r1", "doug", "squire can you look", []string{"u9"}, 5)
+	h.fc.PushMessageAt("m5", "r1", "doug", "squire can you look", []string{"u9"}, 5)
 	waitSettled(t, h, 0, "live message at the cursor must not wake")
 	h.stop(t)
 }
@@ -1262,7 +1034,7 @@ func TestCatchUpDedupesReplayedMessages(t *testing.T) {
 		}
 		// The history returns older (log 3, 5) and newer (log 6) messages;
 		// only the newer one is evaluated.
-		h.srv.setCatchUp(
+		h.srv.SetCatchUp(
 			[]map[string]any{{"room_id": "r1"}},
 			map[string][]map[string]any{
 				"r1": {
@@ -1305,12 +1077,12 @@ func TestReplayAndLiveOverlapDeliversOnce(t *testing.T) {
 	if err := h.st.SetCursor(context.Background(), "r1", 5); err != nil {
 		t.Fatalf("set cursor: %v", err)
 	}
-	h.srv.historyGate = make(chan struct{})
-	h.srv.historyGateHit = make(chan struct{}, 1)
+	h.srv.HistoryGate = make(chan struct{})
+	h.srv.HistoryGateHit = make(chan struct{}, 1)
 	var gateOnce sync.Once
-	closeGate := func() { gateOnce.Do(func() { close(h.srv.historyGate) }) }
+	closeGate := func() { gateOnce.Do(func() { close(h.srv.HistoryGate) }) }
 	t.Cleanup(closeGate)
-	h.srv.setCatchUp(
+	h.srv.SetCatchUp(
 		[]map[string]any{{"room_id": "r1"}},
 		map[string][]map[string]any{
 			"r1": {{
@@ -1324,16 +1096,15 @@ func TestReplayAndLiveOverlapDeliversOnce(t *testing.T) {
 
 	// Force a reconnect: the catch-up goroutine blocks on the history
 	// response.
-	fc1 := h.srv.connAt(t, 1)
-	fc1.conn.CloseNow()
-	select {
-	case <-fc1.closed:
-	case <-time.After(10 * time.Second):
-		t.Fatal("timed out waiting for connection close")
+	fc1 := h.srv.ConnAt(t, 1)
+	fc1.Close()
+	if err := fc1.WaitForClose(); err != nil {
+		t.Fatal(err)
 	}
-	fc2 := h.srv.connAt(t, 2)
+	fc2 := h.srv.ConnAt(t, 2)
+	fc2.WantToken = "tok-2" // the client re-auths with the rotated token
 	errC := make(chan error, 1)
-	go func() { errC <- fc2.handshake() }()
+	go func() { errC <- serverHandshake(t, fc2) }()
 	if err := <-errC; err != nil {
 		t.Fatalf("server handshake: %v", err)
 	}
@@ -1341,14 +1112,14 @@ func TestReplayAndLiveOverlapDeliversOnce(t *testing.T) {
 
 	// The live push of the same message (log 6) is evaluated and
 	// advances the cursor.
-	fc2.pushMessageAt("m6", "r1", "doug", "squire can you look", []string{"u9"}, 6)
+	fc2.PushMessageAt("m6", "r1", "doug", "squire can you look", []string{"u9"}, 6)
 	waitCursor(t, h, 6)
 
 	// Wait for the catch-up to reach the history fetch (the replay
 	// path is live), then release it: the catch-up's copy of m6 is at
 	// the cursor and is skipped.
 	select {
-	case <-h.srv.historyGateHit:
+	case <-h.srv.HistoryGateHit:
 	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for the catch-up history fetch")
 	}
@@ -1365,7 +1136,7 @@ func TestHistoryCacheFedByStream(t *testing.T) {
 
 	// The bot posts a message (m2, log 2): its author is cached by the
 	// stream.
-	h.fc.push("message", map[string]any{
+	h.fc.Push("message", map[string]any{
 		"message_id": "m2", "log_id": 2, "room_id": "r1",
 		"from": map[string]any{"user_id": "u9", "name": "squire"},
 		"body": map[string]any{"text": "bot post"},
@@ -1375,7 +1146,7 @@ func TestHistoryCacheFedByStream(t *testing.T) {
 	// A reply to the bot's post (m3, log 3): the author (u9) resolves
 	// from the cache (m2 was fed by the stream), so the reply wake
 	// fires without a History call.
-	h.fc.push("message", map[string]any{
+	h.fc.Push("message", map[string]any{
 		"message_id": "m3", "log_id": 3, "room_id": "r1",
 		"from":     map[string]any{"user_id": "doug", "name": "doug"},
 		"body":     map[string]any{"text": "reply to bot"},
@@ -1395,7 +1166,7 @@ func TestHistoryCacheMissFallsBackToHistory(t *testing.T) {
 	h := startHarness(t, cfg)
 	// Configure the fake server's history to include the bot's message
 	// (so the History fallback resolves the author).
-	h.srv.setCatchUp(
+	h.srv.SetCatchUp(
 		nil,
 		map[string][]map[string]any{
 			"r1": {{
@@ -1407,7 +1178,7 @@ func TestHistoryCacheMissFallsBackToHistory(t *testing.T) {
 	)
 	// A reply to m100 (not in the stream): the author resolves via the
 	// History fallback.
-	h.fc.push("message", map[string]any{
+	h.fc.Push("message", map[string]any{
 		"message_id": "m101", "log_id": 101, "room_id": "r1",
 		"from":     map[string]any{"user_id": "doug", "name": "doug"},
 		"body":     map[string]any{"text": "reply to history"},
@@ -1427,7 +1198,7 @@ func TestHistoryCacheMissFallsBackToHistory(t *testing.T) {
 func TestReplyWakeRetriesFailedHistoryLookup(t *testing.T) {
 	cfg := baseCfg()
 	h := startHarness(t, cfg)
-	h.srv.setCatchUp(
+	h.srv.SetCatchUp(
 		nil,
 		map[string][]map[string]any{
 			"r1": {{
@@ -1437,10 +1208,10 @@ func TestReplyWakeRetriesFailedHistoryLookup(t *testing.T) {
 			}},
 		},
 	)
-	h.srv.setHistoryFailures(2)
+	h.srv.SetHistoryFailures(2)
 	// A reply to m100 (not in the stream): the History fallback fails
 	// twice, then succeeds on the retry.
-	h.fc.push("message", map[string]any{
+	h.fc.Push("message", map[string]any{
 		"message_id": "m101", "log_id": 101, "room_id": "r1",
 		"from":     map[string]any{"user_id": "doug", "name": "doug"},
 		"body":     map[string]any{"text": "reply to history"},
@@ -1469,13 +1240,13 @@ func TestSlowDelivererDoesNotBlockRecordProcessing(t *testing.T) {
 
 	// m1 (log 1) is a live mention: the daemon enqueues it and the
 	// flush blocks in the deliverer.
-	h.fc.pushMessageAt("m1", "r1", "doug", "squire can you look", []string{"u9"}, 1)
+	h.fc.PushMessageAt("m1", "r1", "doug", "squire can you look", []string{"u9"}, 1)
 	waitFor(t, bd.entered, "the first delivery to start")
 
 	// m2 (log 2) is replayed by the reconnect catch-up while the first
 	// delivery is still blocked. The cursor is already at 1 (m1), so
 	// only m2 is replayed.
-	h.srv.setCatchUp(
+	h.srv.SetCatchUp(
 		[]map[string]any{{"room_id": "r1"}},
 		map[string][]map[string]any{
 			"r1": {{
@@ -1486,16 +1257,15 @@ func TestSlowDelivererDoesNotBlockRecordProcessing(t *testing.T) {
 			}},
 		},
 	)
-	fc1 := h.srv.connAt(t, 1)
-	fc1.conn.CloseNow()
-	select {
-	case <-fc1.closed:
-	case <-time.After(10 * time.Second):
-		t.Fatal("timed out waiting for connection close")
+	fc1 := h.srv.ConnAt(t, 1)
+	fc1.Close()
+	if err := fc1.WaitForClose(); err != nil {
+		t.Fatal(err)
 	}
-	fc2 := h.srv.connAt(t, 2)
+	fc2 := h.srv.ConnAt(t, 2)
+	fc2.WantToken = "tok-2" // the client re-auths with the rotated token
 	errC := make(chan error, 1)
-	go func() { errC <- fc2.handshake() }()
+	go func() { errC <- serverHandshake(t, fc2) }()
 	if err := <-errC; err != nil {
 		t.Fatalf("server handshake: %v", err)
 	}

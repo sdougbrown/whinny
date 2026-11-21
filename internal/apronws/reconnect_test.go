@@ -2,26 +2,27 @@ package apronws
 
 import (
 	"context"
+	"github.com/sdougbrown/whinny/internal/apronws/apronfake"
 	"testing"
 	"time"
 )
 
 func TestReconnect(t *testing.T) {
-	f := newFakeServer(t)
+	f := apronfake.New(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	go func() {
-		fc, err := f.waitConn(1)
+		fc, err := f.WaitConn(1)
 		if err != nil {
 			t.Error(err)
 			return
 		}
-		if err := fc.handshake(ctx, 30); err != nil {
+		if err := fc.Handshake(ctx, 30); err != nil {
 			t.Error(err)
 		}
 	}()
-	c, err := Connect(ctx, Options{URL: f.wsURL(), Token: "test-token"})
+	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
@@ -30,23 +31,23 @@ func TestReconnect(t *testing.T) {
 	reconnected := make(chan struct{})
 	c.SetOnReconnect(func() { close(reconnected) })
 
-	fc1, err := f.waitConn(1)
+	fc1, err := f.WaitConn(1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fc1.close()
-	if err := fc1.waitForClose(); err != nil {
+	fc1.Close()
+	if err := fc1.WaitForClose(); err != nil {
 		t.Fatal(err)
 	}
 
 	go func() {
-		fc2, err := f.waitConn(2)
+		fc2, err := f.WaitConn(2)
 		if err != nil {
 			t.Error(err)
 			return
 		}
-		fc2.wantToken = "tok-2" // the client re-auths with the rotated token
-		if err := fc2.handshake(ctx, 30); err != nil {
+		fc2.WantToken = "tok-2" // the client re-auths with the rotated token
+		if err := fc2.Handshake(ctx, 30); err != nil {
 			t.Error(err)
 		}
 	}()
@@ -57,11 +58,11 @@ func TestReconnect(t *testing.T) {
 	}
 
 	// Push delivery resumes on the replacement connection.
-	fc2, err := f.waitConn(2)
+	fc2, err := f.WaitConn(2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fc2.sendFrame(map[string]any{
+	if err := fc2.SendFrame(map[string]any{
 		"method": "message",
 		"params": map[string]any{
 			"message_id": "m2",
@@ -83,45 +84,45 @@ func TestReconnect(t *testing.T) {
 // client is running: the first reconnect runs the hook set via Options,
 // the second runs the swapped-in hook.
 func TestSetOnReconnectAfterConnect(t *testing.T) {
-	f := newFakeServer(t)
+	f := apronfake.New(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	first := make(chan struct{})
 	second := make(chan struct{})
 	go func() {
-		fc, err := f.waitConn(1)
+		fc, err := f.WaitConn(1)
 		if err != nil {
 			t.Error(err)
 			return
 		}
-		if err := fc.handshake(ctx, 30); err != nil {
+		if err := fc.Handshake(ctx, 30); err != nil {
 			t.Error(err)
 		}
 	}()
-	c, err := Connect(ctx, Options{URL: f.wsURL(), Token: "test-token", OnReconnect: func() { close(first) }})
+	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token", OnReconnect: func() { close(first) }})
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
 	defer c.Close()
 
 	// Reconnect #1: the hook set via Options fires.
-	fc1, err := f.waitConn(1)
+	fc1, err := f.WaitConn(1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fc1.close()
-	if err := fc1.waitForClose(); err != nil {
+	fc1.Close()
+	if err := fc1.WaitForClose(); err != nil {
 		t.Fatal(err)
 	}
 	go func() {
-		fc2, err := f.waitConn(2)
+		fc2, err := f.WaitConn(2)
 		if err != nil {
 			t.Error(err)
 			return
 		}
-		fc2.wantToken = "tok-2" // the client re-auths with the rotated token
-		if err := fc2.handshake(ctx, 30); err != nil {
+		fc2.WantToken = "tok-2" // the client re-auths with the rotated token
+		if err := fc2.Handshake(ctx, 30); err != nil {
 			t.Error(err)
 		}
 	}()
@@ -135,22 +136,22 @@ func TestSetOnReconnectAfterConnect(t *testing.T) {
 	c.SetOnReconnect(func() { close(second) })
 
 	// Reconnect #2: the swapped-in hook fires.
-	fc2, err := f.waitConn(2)
+	fc2, err := f.WaitConn(2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fc2.close()
-	if err := fc2.waitForClose(); err != nil {
+	fc2.Close()
+	if err := fc2.WaitForClose(); err != nil {
 		t.Fatal(err)
 	}
 	go func() {
-		fc3, err := f.waitConn(3)
+		fc3, err := f.WaitConn(3)
 		if err != nil {
 			t.Error(err)
 			return
 		}
-		fc3.wantToken = "tok-2" // the client re-auths with the rotated token
-		if err := fc3.handshake(ctx, 30); err != nil {
+		fc3.WantToken = "tok-2" // the client re-auths with the rotated token
+		if err := fc3.Handshake(ctx, 30); err != nil {
 			t.Error(err)
 		}
 	}()
@@ -162,21 +163,21 @@ func TestSetOnReconnectAfterConnect(t *testing.T) {
 }
 
 func TestKeepalive(t *testing.T) {
-	f := newFakeServer(t)
+	f := apronfake.New(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
 	go func() {
-		fc, err := f.waitConn(1)
+		fc, err := f.WaitConn(1)
 		if err != nil {
 			t.Error(err)
 			return
 		}
-		if err := fc.handshake(ctx, 1); err != nil { // server suggests a 1s interval, clamped to the 5s minimum
+		if err := fc.Handshake(ctx, 1); err != nil { // server suggests a 1s interval, clamped to the 5s minimum
 			t.Error(err)
 		}
 	}()
-	c, err := Connect(ctx, Options{URL: f.wsURL(), Token: "test-token"})
+	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
@@ -185,7 +186,7 @@ func TestKeepalive(t *testing.T) {
 	reconnected := make(chan struct{})
 	c.SetOnReconnect(func() { close(reconnected) })
 
-	fc, err := f.waitConn(1)
+	fc, err := f.WaitConn(1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +194,7 @@ func TestKeepalive(t *testing.T) {
 	// Cadence: the client pings on the server-suggested interval, clamped to
 	// the 5s minimum.
 	for i := 0; i < 2; i++ {
-		f, err := fc.recvFrame(ctx)
+		f, err := fc.RecvFrame(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -203,15 +204,15 @@ func TestKeepalive(t *testing.T) {
 	}
 
 	// A missed pong must kill the connection and trigger a reconnect.
-	fc.autoPong.Store(false)
+	fc.AutoPong.Store(false)
 	go func() {
-		fc2, err := f.waitConn(2)
+		fc2, err := f.WaitConn(2)
 		if err != nil {
 			t.Error(err)
 			return
 		}
-		fc2.wantToken = "tok-2" // the client re-auths with the rotated token
-		if err := fc2.handshake(ctx, 1); err != nil {
+		fc2.WantToken = "tok-2" // the client re-auths with the rotated token
+		if err := fc2.Handshake(ctx, 1); err != nil {
 			t.Error(err)
 		}
 	}()

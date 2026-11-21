@@ -3,6 +3,7 @@ package apronws
 import (
 	"context"
 	"errors"
+	"github.com/sdougbrown/whinny/internal/apronws/apronfake"
 	"testing"
 	"time"
 )
@@ -11,27 +12,27 @@ import (
 // flight when the connection drops returns ErrConnectionLost, and a Send in
 // flight at Close returns ErrClientClosed.
 func TestInFlightFailure(t *testing.T) {
-	f := newFakeServer(t)
+	f := apronfake.New(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	go func() {
-		fc, err := f.waitConn(1)
+		fc, err := f.WaitConn(1)
 		if err != nil {
 			t.Error(err)
 			return
 		}
-		if err := fc.handshake(ctx, 30); err != nil {
+		if err := fc.Handshake(ctx, 30); err != nil {
 			t.Error(err)
 		}
 	}()
-	c, err := Connect(ctx, Options{URL: f.wsURL(), Token: "test-token"})
+	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
 	defer c.Close()
 
-	fc, err := f.waitConn(1)
+	fc, err := f.WaitConn(1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,15 +47,15 @@ func TestInFlightFailure(t *testing.T) {
 		errCh <- err
 	}()
 	// The request reaching the server proves the Send is in flight.
-	fr, err := fc.recvFrame(ctx)
+	fr, err := fc.RecvFrame(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if fr.Method != "history" {
 		t.Fatalf("frame = %q, want history", fr.Method)
 	}
-	fc.close()
-	if err := fc.waitForClose(); err != nil {
+	fc.Close()
+	if err := fc.WaitForClose(); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -67,13 +68,13 @@ func TestInFlightFailure(t *testing.T) {
 	}
 
 	// Reconnect and re-auth; the client now holds the rotated token.
-	fc2, err := f.waitConn(2)
+	fc2, err := f.WaitConn(2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fc2.wantToken = "tok-2"
+	fc2.WantToken = "tok-2"
 	go func() {
-		if err := fc2.handshake(ctx, 30); err != nil {
+		if err := fc2.Handshake(ctx, 30); err != nil {
 			t.Error(err)
 		}
 	}()
@@ -89,7 +90,7 @@ func TestInFlightFailure(t *testing.T) {
 		_, err := c.Send(ctx, "history", nil)
 		errCh2 <- err
 	}()
-	f2, err := fc2.recvFrame(ctx)
+	f2, err := fc2.RecvFrame(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,21 +111,21 @@ func TestInFlightFailure(t *testing.T) {
 // TestRecordsClosedAfterClose verifies the Records channel is closed when the
 // client stops.
 func TestRecordsClosedAfterClose(t *testing.T) {
-	f := newFakeServer(t)
+	f := apronfake.New(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	go func() {
-		fc, err := f.waitConn(1)
+		fc, err := f.WaitConn(1)
 		if err != nil {
 			t.Error(err)
 			return
 		}
-		if err := fc.handshake(ctx, 30); err != nil {
+		if err := fc.Handshake(ctx, 30); err != nil {
 			t.Error(err)
 		}
 	}()
-	c, err := Connect(ctx, Options{URL: f.wsURL(), Token: "test-token"})
+	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
@@ -142,34 +143,34 @@ func TestRecordsClosedAfterClose(t *testing.T) {
 // TestBackpressure verifies a full records buffer stalls the read loop, and
 // draining it resumes the loop.
 func TestBackpressure(t *testing.T) {
-	f := newFakeServer(t)
+	f := apronfake.New(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
 	go func() {
-		fc, err := f.waitConn(1)
+		fc, err := f.WaitConn(1)
 		if err != nil {
 			t.Error(err)
 			return
 		}
-		if err := fc.handshake(ctx, 30); err != nil {
+		if err := fc.Handshake(ctx, 30); err != nil {
 			t.Error(err)
 		}
 	}()
-	c, err := Connect(ctx, Options{URL: f.wsURL(), Token: "test-token"})
+	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
 	defer c.Close()
 
-	fc, err := f.waitConn(1)
+	fc, err := f.WaitConn(1)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Fill the 256-buffer and one more; the 257th stalls the read loop.
 	for i := 0; i < 257; i++ {
-		if err := fc.sendFrame(map[string]any{"method": "activity", "params": map[string]any{"i": i}}); err != nil {
+		if err := fc.SendFrame(map[string]any{"method": "activity", "params": map[string]any{"i": i}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -182,14 +183,14 @@ func TestBackpressure(t *testing.T) {
 		_, err := c.Send(shortCtx, "history", nil)
 		errCh <- err
 	}()
-	fr, err := fc.recvFrame(ctx)
+	fr, err := fc.RecvFrame(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if fr.Method != "history" {
 		t.Fatalf("frame = %q, want history", fr.Method)
 	}
-	if err := fc.sendFrame(map[string]any{"id": fr.ID, "result": map[string]any{"ok": true}}); err != nil {
+	if err := fc.SendFrame(map[string]any{"id": fr.ID, "result": map[string]any{"ok": true}}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -220,14 +221,14 @@ func TestBackpressure(t *testing.T) {
 		}
 		resCh <- struct{}{}
 	}()
-	f2, err := fc.recvFrame(ctx)
+	f2, err := fc.RecvFrame(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if f2.Method != "history" {
 		t.Fatalf("frame = %q, want history", f2.Method)
 	}
-	if err := fc.sendFrame(map[string]any{"id": f2.ID, "result": map[string]any{"ok": true}}); err != nil {
+	if err := fc.SendFrame(map[string]any{"id": f2.ID, "result": map[string]any{"ok": true}}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -242,27 +243,27 @@ func TestBackpressure(t *testing.T) {
 // TestPendingMapHygiene verifies successful replies delete their pending entry,
 // so the map does not grow unbounded.
 func TestPendingMapHygiene(t *testing.T) {
-	f := newFakeServer(t)
+	f := apronfake.New(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	go func() {
-		fc, err := f.waitConn(1)
+		fc, err := f.WaitConn(1)
 		if err != nil {
 			t.Error(err)
 			return
 		}
-		if err := fc.handshake(ctx, 30); err != nil {
+		if err := fc.Handshake(ctx, 30); err != nil {
 			t.Error(err)
 		}
 	}()
-	c, err := Connect(ctx, Options{URL: f.wsURL(), Token: "test-token"})
+	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
 	defer c.Close()
 
-	fc, err := f.waitConn(1)
+	fc, err := f.WaitConn(1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,14 +277,14 @@ func TestPendingMapHygiene(t *testing.T) {
 			}
 			close(done)
 		}()
-		fr, err := fc.recvFrame(ctx)
+		fr, err := fc.RecvFrame(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if fr.Method != "history" {
 			t.Fatalf("frame = %q, want history", fr.Method)
 		}
-		if err := fc.sendFrame(map[string]any{"id": fr.ID, "result": map[string]any{"ok": true}}); err != nil {
+		if err := fc.SendFrame(map[string]any{"id": fr.ID, "result": map[string]any{"ok": true}}); err != nil {
 			t.Fatal(err)
 		}
 		select {
@@ -304,46 +305,46 @@ func TestPendingMapHygiene(t *testing.T) {
 // TestRotatedToken verifies the client stores the server-issued token from the
 // first auth and re-auths with it on reconnect.
 func TestRotatedToken(t *testing.T) {
-	f := newFakeServer(t)
+	f := apronfake.New(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	go func() {
-		fc, err := f.waitConn(1)
+		fc, err := f.WaitConn(1)
 		if err != nil {
 			t.Error(err)
 			return
 		}
 		// First auth uses opts.Token; the reply issues the rotated token.
-		if err := fc.handshake(ctx, 30); err != nil {
+		if err := fc.Handshake(ctx, 30); err != nil {
 			t.Error(err)
 		}
 	}()
-	c, err := Connect(ctx, Options{URL: f.wsURL(), Token: "test-token"})
+	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
 	defer c.Close()
 
 	// Force a reconnect.
-	fc1, err := f.waitConn(1)
+	fc1, err := f.WaitConn(1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fc1.close()
-	if err := fc1.waitForClose(); err != nil {
+	fc1.Close()
+	if err := fc1.WaitForClose(); err != nil {
 		t.Fatal(err)
 	}
 
 	// The replacement connection must auth with the rotated token.
-	fc2, err := f.waitConn(2)
+	fc2, err := f.WaitConn(2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fc2.wantToken = "tok-2"
+	fc2.WantToken = "tok-2"
 	authed := make(chan struct{})
 	go func() {
-		if err := fc2.handshake(ctx, 30); err != nil {
+		if err := fc2.Handshake(ctx, 30); err != nil {
 			t.Error(err)
 			return
 		}

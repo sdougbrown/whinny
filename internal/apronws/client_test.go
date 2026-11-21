@@ -4,27 +4,28 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/sdougbrown/whinny/internal/apronws/apronfake"
 	"testing"
 	"time"
 )
 
 func TestConnectHandshake(t *testing.T) {
-	f := newFakeServer(t)
+	f := apronfake.New(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	go func() {
-		fc, err := f.waitConn(1)
+		fc, err := f.WaitConn(1)
 		if err != nil {
 			t.Error(err)
 			return
 		}
-		if err := fc.handshake(ctx, 30); err != nil {
+		if err := fc.Handshake(ctx, 30); err != nil {
 			t.Error(err)
 		}
 	}()
 
-	c, err := Connect(ctx, Options{URL: f.wsURL(), Token: "test-token"})
+	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
@@ -49,43 +50,43 @@ func TestConnectHandshake(t *testing.T) {
 // reconnect: a request issued while the replacement connection is
 // unauthenticated fails client-side and is never sent to the server.
 func TestSendFailsBeforeAuth(t *testing.T) {
-	f := newFakeServer(t)
+	f := apronfake.New(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	go func() {
-		fc, err := f.waitConn(1)
+		fc, err := f.WaitConn(1)
 		if err != nil {
 			t.Error(err)
 			return
 		}
-		if err := fc.handshake(ctx, 30); err != nil {
+		if err := fc.Handshake(ctx, 30); err != nil {
 			t.Error(err)
 		}
 	}()
-	c, err := Connect(ctx, Options{URL: f.wsURL(), Token: "test-token"})
+	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
 	defer c.Close()
 
 	// Force a close: the client enters its reconnect window, unauthenticated.
-	fc1, err := f.waitConn(1)
+	fc1, err := f.WaitConn(1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fc1.close()
-	if err := fc1.waitForClose(); err != nil {
+	fc1.Close()
+	if err := fc1.WaitForClose(); err != nil {
 		t.Fatal(err)
 	}
 
 	// Once the client has dialed the replacement, the old connection is
 	// torn down and auth is incomplete.
-	fc2, err := f.waitConn(2)
+	fc2, err := f.WaitConn(2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fc2.wantToken = "tok-2" // the client re-auths with the rotated token
+	fc2.WantToken = "tok-2" // the client re-auths with the rotated token
 
 	// A request before re-auth fails client-side and is never sent.
 	if _, err := c.Send(ctx, "history", nil); !errors.Is(err, ErrNotAuthenticated) {
@@ -95,11 +96,11 @@ func TestSendFailsBeforeAuth(t *testing.T) {
 	reconnected := make(chan struct{})
 	c.SetOnReconnect(func() { close(reconnected) })
 	go func() {
-		if err := fc2.handshake(ctx, 30); err != nil {
+		if err := fc2.Handshake(ctx, 30); err != nil {
 			t.Error(err)
 			return
 		}
-		f, err := fc2.recvFrame(ctx)
+		f, err := fc2.RecvFrame(ctx)
 		if err != nil {
 			t.Error(err)
 			return
@@ -108,7 +109,7 @@ func TestSendFailsBeforeAuth(t *testing.T) {
 			t.Errorf("first post-auth frame = %q, want history", f.Method)
 			return
 		}
-		if err := fc2.sendFrame(map[string]any{"id": f.ID, "result": map[string]any{"ok": true}}); err != nil {
+		if err := fc2.SendFrame(map[string]any{"id": f.ID, "result": map[string]any{"ok": true}}); err != nil {
 			t.Error(err)
 		}
 	}()
@@ -129,22 +130,22 @@ func TestSendFailsBeforeAuth(t *testing.T) {
 }
 
 func TestSendReplyAndError(t *testing.T) {
-	f := newFakeServer(t)
+	f := apronfake.New(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	go func() {
-		fc, err := f.waitConn(1)
+		fc, err := f.WaitConn(1)
 		if err != nil {
 			t.Error(err)
 			return
 		}
-		if err := fc.handshake(ctx, 30); err != nil {
+		if err := fc.Handshake(ctx, 30); err != nil {
 			t.Error(err)
 			return
 		}
 
-		f, err := fc.recvFrame(ctx)
+		f, err := fc.RecvFrame(ctx)
 		if err != nil {
 			t.Error(err)
 			return
@@ -167,12 +168,12 @@ func TestSendReplyAndError(t *testing.T) {
 			t.Errorf("params = %+v, want room r1 body hi", p)
 			return
 		}
-		if err := fc.sendFrame(map[string]any{"id": f.ID, "result": map[string]any{"message_id": "m1"}}); err != nil {
+		if err := fc.SendFrame(map[string]any{"id": f.ID, "result": map[string]any{"message_id": "m1"}}); err != nil {
 			t.Error(err)
 			return
 		}
 
-		f, err = fc.recvFrame(ctx)
+		f, err = fc.RecvFrame(ctx)
 		if err != nil {
 			t.Error(err)
 			return
@@ -181,7 +182,7 @@ func TestSendReplyAndError(t *testing.T) {
 			t.Errorf("second request = %q, want history", f.Method)
 			return
 		}
-		err = fc.sendFrame(map[string]any{
+		err = fc.SendFrame(map[string]any{
 			"id": f.ID,
 			"error": map[string]any{
 				"code":    429,
@@ -194,7 +195,7 @@ func TestSendReplyAndError(t *testing.T) {
 		}
 	}()
 
-	c, err := Connect(ctx, Options{URL: f.wsURL(), Token: "test-token"})
+	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
@@ -228,34 +229,34 @@ func TestSendReplyAndError(t *testing.T) {
 }
 
 func TestPushDelivery(t *testing.T) {
-	f := newFakeServer(t)
+	f := apronfake.New(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	go func() {
-		fc, err := f.waitConn(1)
+		fc, err := f.WaitConn(1)
 		if err != nil {
 			t.Error(err)
 			return
 		}
-		if err := fc.handshake(ctx, 30); err != nil {
+		if err := fc.Handshake(ctx, 30); err != nil {
 			t.Error(err)
 		}
 	}()
-	c, err := Connect(ctx, Options{URL: f.wsURL(), Token: "test-token"})
+	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
 	defer c.Close()
 
-	fc, err := f.waitConn(1)
+	fc, err := f.WaitConn(1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fc.sendFrame(map[string]any{"method": "frobnicate", "params": map[string]any{}}); err != nil {
+	if err := fc.SendFrame(map[string]any{"method": "frobnicate", "params": map[string]any{}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := fc.sendFrame(map[string]any{
+	if err := fc.SendFrame(map[string]any{
 		"method": "message",
 		"params": map[string]any{
 			"message_id": "m9",
@@ -267,7 +268,7 @@ func TestPushDelivery(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := fc.sendFrame(map[string]any{"method": "room_update", "params": map[string]any{"kind": "joined", "room_id": "r2"}}); err != nil {
+	if err := fc.SendFrame(map[string]any{"method": "room_update", "params": map[string]any{"kind": "joined", "room_id": "r2"}}); err != nil {
 		t.Fatal(err)
 	}
 
