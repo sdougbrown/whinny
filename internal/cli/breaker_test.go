@@ -177,7 +177,7 @@ func TestPostQuietDenialDoesNotBump(t *testing.T) {
 	if err := d.Store.SetMeta(context.Background(), MetaQuietUntil, "9999999999"); err != nil {
 		t.Fatalf("SetMeta: %v", err)
 	}
-	for i := 0; i < guard.BreakerTripThreshold; i++ {
+	for i := 0; i < breakerTripThreshold; i++ {
 		err := postOnce(t, d)
 		if err == nil || !strings.Contains(err.Error(), "refused-quiet") {
 			t.Fatalf("post %d err = %v, want a refused-quiet denial", i+1, err)
@@ -224,7 +224,7 @@ func TestBreakerLatchPersistsAcrossReopen(t *testing.T) {
 		},
 		Now: func() time.Time { return time.Unix(2_000_000, 0) },
 	}
-	for i := 0; i < guard.BreakerTripThreshold; i++ {
+	for i := 0; i < breakerTripThreshold; i++ {
 		if err := postOnce(t, d); err == nil {
 			t.Fatalf("post %d: want a failure, got nil", i+1)
 		}
@@ -256,7 +256,7 @@ func TestBreakerClear(t *testing.T) {
 		postErr: errors.New("send failed"),
 	}
 	d := breakerDeps(t, c)
-	for i := 0; i < guard.BreakerTripThreshold; i++ {
+	for i := 0; i < breakerTripThreshold; i++ {
 		if err := postOnce(t, d); err == nil {
 			t.Fatalf("post %d: want a failure, got nil", i+1)
 		}
@@ -289,7 +289,7 @@ func TestPostBreakerRefusalMatchesGuardFormat(t *testing.T) {
 		postErr: errors.New("send failed"),
 	}
 	d := breakerDeps(t, c)
-	for i := 0; i < guard.BreakerTripThreshold; i++ {
+	for i := 0; i < breakerTripThreshold; i++ {
 		if err := postOnce(t, d); err == nil {
 			t.Fatalf("post %d: want a failure, got nil", i+1)
 		}

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -99,15 +98,12 @@ func PostHandler(d Deps) clicontract.HandleFunc {
 		}
 		room, err := ResolveRoom(rooms.Joined, rooms.NotJoined, inv.Flags["room"])
 		if err != nil {
-			// A room-resolution failure is a usage error the caller can
-			// fix from the message (room.go), not a bad send outcome —
-			// refund without counting it toward the breaker.
+			// ResolveRoom only returns *RoomError (usage errors the
+			// caller can fix from the message) or nil — never a send-
+			// path failure — so refund without counting toward the
+			// breaker.
 			bucket.Refund()
-			var re *RoomError
-			if errors.As(err, &re) {
-				return nil, err
-			}
-			return failSend(OperationalErrorf("resolve room: %v", err))
+			return nil, err
 		}
 		postRoom := room.ID
 		var outRoomID string
@@ -207,6 +203,12 @@ func (d Deps) guard(ctx context.Context, st *store.Store) (*guard.RateBucket, gu
 // not the last outcome.
 const breakerTripReason = "bad send outcomes"
 
+// breakerTripThreshold is the consecutive bad-outcome count (rate-
+// limit denials or failed posts) that latches the send-path breaker.
+// It lives beside its enforcement point: the guard only reads the
+// latch, it never trips one.
+const breakerTripThreshold = 5
+
 // tripOnFailure bumps the consecutive post-failure counter and, when
 // the bump reaches the trip threshold, latches the breaker with the
 // outcome-neutral reason. It returns the latch reason when the
@@ -219,7 +221,7 @@ func (d Deps) tripOnFailure(ctx context.Context, st *store.Store) (string, bool)
 		log.Printf("whinny: post-failure count: %v", err)
 		return "", false
 	}
-	if n < guard.BreakerTripThreshold {
+	if n < breakerTripThreshold {
 		return "", false
 	}
 	reason := fmt.Sprintf("%d consecutive %s", n, breakerTripReason)
