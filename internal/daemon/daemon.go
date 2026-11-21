@@ -404,7 +404,7 @@ func (d *daemon) handleShared(ctx context.Context, m *apronws.Message) {
 	msg := mapMsg(m)
 	var watches []store.Watch
 	for _, w := range d.roomWatches(ctx, m.RoomID) {
-		if d.hasDeliveryCallback(ctx, w.Owner) {
+		if len(d.ownerCommand(ctx, w.Owner)) > 0 {
 			watches = append(watches, w)
 		}
 	}
@@ -454,13 +454,6 @@ func (d *daemon) ownerCommand(ctx context.Context, owner string) []string {
 	return SplitCommand(v)
 }
 
-// hasDeliveryCallback reports whether the owner has a stored delivery
-// callback: the shared-mode owner rule for both the message path and the
-// expiry sweep.
-func (d *daemon) hasDeliveryCallback(ctx context.Context, owner string) bool {
-	return len(d.ownerCommand(ctx, owner)) > 0
-}
-
 // ownsWatch reports whether this resident daemon should act on a watch
 // with owner: watch.DefaultOwner (the default) and the daemon's own
 // agent are kept; anything else belongs to a shared-mode transient with
@@ -485,9 +478,6 @@ func (d *daemon) expireDue(ctx context.Context) {
 	}
 	for _, w := range due {
 		if d.cfg.Mode == ModeResident && !d.ownsWatch(w.Owner) {
-			continue
-		}
-		if d.cfg.Mode == ModeShared && !d.hasDeliveryCallback(ctx, w.Owner) {
 			continue
 		}
 		env := ExpiryEnvelope(w)
