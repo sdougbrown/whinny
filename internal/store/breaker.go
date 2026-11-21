@@ -36,10 +36,10 @@ func (s *Store) SetBreaker(ctx context.Context, b Breaker) error {
 // breaker set returns a zero (not-latched) Breaker with a nil error.
 func (s *Store) GetBreaker(ctx context.Context) (Breaker, error) {
 	var (
-		b      Breaker
+		b       Breaker
 		latched int
-		at     sql.NullInt64
-		reason sql.NullString
+		at      sql.NullInt64
+		reason  sql.NullString
 	)
 	err := s.db.QueryRowContext(ctx,
 		`SELECT latched, latched_at, reason FROM breaker WHERE id = 1`).
