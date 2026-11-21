@@ -150,7 +150,6 @@ type RateBucket struct {
 	mu     sync.Mutex
 	tokens float64
 	cap    float64
-	refill time.Duration
 	last   time.Time
 	// takeFn, when set, makes the take perform the (refill, take,
 	// persist) as one atomic operation. This is the store-backed path
@@ -174,7 +173,6 @@ func NewRateBucket(cfg Config) *RateBucket {
 	return &RateBucket{
 		tokens: float64(cfg.PerMinute),
 		cap:    float64(cfg.PerMinute),
-		refill: time.Minute / time.Duration(cfg.PerMinute),
 	}
 }
 

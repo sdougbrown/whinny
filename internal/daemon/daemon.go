@@ -143,11 +143,12 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 		// bot's rooms arrive from here on. Operators and scripts wait on
 		// this line to know the daemon is live.
 		log.Printf("daemon: connected to %s", cfg.URL)
-	} else {
-		client.SetOnReconnect(catchUp)
 	}
 	d.client = client
 	d.hist = newHistoryCache(client)
+	if deps.Client != nil {
+		client.SetOnReconnect(catchUp)
+	}
 
 	// Drain stale queue entries for this agent before the loop: a wake
 	// enqueued before a crash fires now. The store's dequeue is
