@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sdougbrown/whinny/internal/rate"
 	"github.com/sdougbrown/whinny/internal/store"
 )
 
@@ -203,11 +204,10 @@ func (b *RateBucket) CanServe(now time.Time) (bool, time.Duration) {
 	if b.cap <= 0 {
 		return false, 0
 	}
-	b.refillTo(now)
-	if b.tokens >= 1-1e-9 {
-		return true, 0
-	}
-	return false, time.Duration((1 - b.tokens) * b.refill.Seconds() * float64(time.Second))
+	st, _ := rate.Refill(rate.State{Tokens: b.tokens, Last: b.last}, int(b.cap), now)
+	b.tokens, b.last = st.Tokens, st.Last
+	ok, wait := rate.Available(st, int(b.cap))
+	return ok, wait
 }
 
 // Take consumes one token at now, refilling first. It reports whether a
@@ -223,22 +223,11 @@ func (b *RateBucket) Take(now time.Time) (bool, time.Duration) {
 	if b.cap <= 0 {
 		return false, 0
 	}
-	b.refillTo(now)
-	if b.tokens >= 1-1e-9 {
-		b.tokens--
-		return true, 0
+	st, _ := rate.Refill(rate.State{Tokens: b.tokens, Last: b.last}, int(b.cap), now)
+	ok, wait := rate.Available(st, int(b.cap))
+	if ok {
+		st = rate.Take(st)
+		b.tokens, b.last = st.Tokens, st.Last
 	}
-	return false, time.Duration((1 - b.tokens) * b.refill.Seconds() * float64(time.Second))
-}
-
-// refillTo tops the bucket up for the time elapsed since the last
-// refill. The caller must hold b.mu.
-func (b *RateBucket) refillTo(now time.Time) {
-	if !b.last.IsZero() && now.After(b.last) {
-		b.tokens += now.Sub(b.last).Seconds() / b.refill.Seconds()
-		if b.tokens > b.cap {
-			b.tokens = b.cap
-		}
-	}
-	b.last = now
+	return ok, wait
 }

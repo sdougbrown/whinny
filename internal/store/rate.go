@@ -6,6 +6,8 @@ import (
 	"errors"
 	"strconv"
 	"time"
+
+	"github.com/sdougbrown/whinny/internal/rate"
 )
 
 // Rate-bucket meta keys. The token count and the last-refill instant
@@ -128,11 +130,9 @@ func (s *Store) TakeRateToken(ctx context.Context, perMinute int, now time.Time)
 	if err := conn.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, MetaRateLast).Scan(&lastStr); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, time.Second, err
 	}
-	refill := time.Minute / time.Duration(perMinute)
-	var tokens float64
-	var last time.Time
+	var state rate.State
 	if tokStr != "" {
-		tokens, err = strconv.ParseFloat(tokStr, 64)
+		state.Tokens, err = strconv.ParseFloat(tokStr, 64)
 		if err != nil {
 			return false, time.Second, err
 		}
@@ -142,39 +142,39 @@ func (s *Store) TakeRateToken(ctx context.Context, perMinute int, now time.Time)
 		if err != nil {
 			return false, time.Second, err
 		}
-		last = parseRateLast(nano)
+		state.Last = parseRateLast(nano)
 	}
-	if last.IsZero() {
-		// A never-set bucket starts full.
-		tokens = float64(perMinute)
-		last = now
-	} else if now.After(last) {
-		tokens += now.Sub(last).Seconds() / refill.Seconds()
-		if tokens > float64(perMinute) {
-			tokens = float64(perMinute)
-		}
-		last = now
-	}
-	if tokens >= 1-1e-9 {
-		tokens--
-		const upsert = `INSERT INTO meta (key, value) VALUES (?, ?)
-			 ON CONFLICT(key) DO UPDATE SET value = excluded.value`
-		if _, err := conn.ExecContext(ctx, upsert, MetaRateTokens, strconv.FormatFloat(tokens, 'f', -1, 64)); err != nil {
-			return false, time.Second, err
-		}
-		if _, err := conn.ExecContext(ctx, upsert, MetaRateLast, strconv.FormatInt(last.UnixNano(), 10)); err != nil {
-			return false, time.Second, err
-		}
+	state, ok := rate.Refill(state, perMinute, now)
+	if !ok {
 		if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 			return false, time.Second, err
 		}
 		done = true
-		return true, 0, nil
+		return false, 0, nil
 	}
-	// Denial: nothing is consumed, nothing is written back.
+	admitted, wait := rate.Available(state, perMinute)
+	if !admitted {
+		// Denial: nothing is consumed, nothing is written back (the
+		// persisted last-refill instant stays, so the next call refills
+		// from it).
+		if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+			return false, time.Second, err
+		}
+		done = true
+		return false, wait, nil
+	}
+	state = rate.Take(state)
+	const upsert = `INSERT INTO meta (key, value) VALUES (?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+	if _, err := conn.ExecContext(ctx, upsert, MetaRateTokens, strconv.FormatFloat(state.Tokens, 'f', -1, 64)); err != nil {
+		return false, time.Second, err
+	}
+	if _, err := conn.ExecContext(ctx, upsert, MetaRateLast, strconv.FormatInt(state.Last.UnixNano(), 10)); err != nil {
+		return false, time.Second, err
+	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return false, time.Second, err
 	}
 	done = true
-	return false, time.Duration((1 - tokens) * refill.Seconds() * float64(time.Second)), nil
+	return true, 0, nil
 }
