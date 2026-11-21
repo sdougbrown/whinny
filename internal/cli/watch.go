@@ -16,8 +16,9 @@ import (
 	"github.com/sdougbrown/whinny/internal/watch"
 )
 
-// MaxTTL is the hard cap on a watch's time to live (7d).
-const MaxTTL = 168 * time.Hour
+// MaxTTL is the hard cap on a watch's time to live, derived from the
+// store's cap so the two cannot drift.
+var MaxTTL = time.Duration(store.MaxTTLSeconds) * time.Second
 
 // DefaultTTL is the watch TTL when --ttl is absent (24h).
 const DefaultTTL = 24 * time.Hour
