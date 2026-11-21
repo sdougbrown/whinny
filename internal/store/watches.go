@@ -43,6 +43,7 @@ var (
 type Watch struct {
 	ID        string
 	RoomID    string
+	Owner     string
 	Kind      string
 	FromUser  string
 	Pattern   string
@@ -89,13 +90,16 @@ func (s *Store) AddWatch(ctx context.Context, w Watch, now time.Time) (Watch, er
 	if w.CreatedAt == 0 {
 		w.CreatedAt = now.Unix()
 	}
+	if w.Owner == "" {
+		w.Owner = "resident"
+	}
 	w.ExpiresAt = w.CreatedAt + int64(w.TTLS)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO watches (id, room_id, kind, from_user, pattern, thread_id, reply_to, note, once, ttl_s, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		w.ID, w.RoomID, w.Kind, w.FromUser, w.Pattern, w.ThreadID, w.ReplyTo, w.Note, w.Once, w.TTLS, w.CreatedAt, w.ExpiresAt)
+		`INSERT INTO watches (id, room_id, owner, kind, from_user, pattern, thread_id, reply_to, note, once, ttl_s, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		w.ID, w.RoomID, w.Owner, w.Kind, w.FromUser, w.Pattern, w.ThreadID, w.ReplyTo, w.Note, w.Once, w.TTLS, w.CreatedAt, w.ExpiresAt)
 	return w, err
 }
 
@@ -104,9 +108,9 @@ func (s *Store) GetWatch(ctx context.Context, id string) (Watch, error) {
 	var w Watch
 	var once int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, room_id, kind, from_user, pattern, thread_id, reply_to, note, once, ttl_s, created_at, expires_at
+		`SELECT id, room_id, owner, kind, from_user, pattern, thread_id, reply_to, note, once, ttl_s, created_at, expires_at
 		 FROM watches WHERE id = ?`, id).
-		Scan(&w.ID, &w.RoomID, &w.Kind, &w.FromUser, &w.Pattern, &w.ThreadID, &w.ReplyTo, &w.Note, &once, &w.TTLS, &w.CreatedAt, &w.ExpiresAt)
+		Scan(&w.ID, &w.RoomID, &w.Owner, &w.Kind, &w.FromUser, &w.Pattern, &w.ThreadID, &w.ReplyTo, &w.Note, &once, &w.TTLS, &w.CreatedAt, &w.ExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Watch{}, ErrNotFound
 	}
@@ -128,7 +132,7 @@ func (s *Store) DeleteWatch(ctx context.Context, id string) error {
 // ListWatches returns all watches, oldest first.
 func (s *Store) ListWatches(ctx context.Context) ([]Watch, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, room_id, kind, from_user, pattern, thread_id, reply_to, note, once, ttl_s, created_at, expires_at
+		`SELECT id, room_id, owner, kind, from_user, pattern, thread_id, reply_to, note, once, ttl_s, created_at, expires_at
 		 FROM watches ORDER BY created_at, id`)
 	if err != nil {
 		return nil, err
@@ -149,7 +153,7 @@ func (s *Store) ListWatches(ctx context.Context) ([]Watch, error) {
 // first.
 func (s *Store) DueWatches(ctx context.Context, now time.Time) ([]Watch, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, room_id, kind, from_user, pattern, thread_id, reply_to, note, once, ttl_s, created_at, expires_at
+		`SELECT id, room_id, owner, kind, from_user, pattern, thread_id, reply_to, note, once, ttl_s, created_at, expires_at
 		 FROM watches WHERE expires_at <= ? ORDER BY expires_at, id`, now.Unix())
 	if err != nil {
 		return nil, err
@@ -173,7 +177,7 @@ type scanner interface {
 func scanWatch(row scanner) (Watch, error) {
 	var w Watch
 	var once int
-	err := row.Scan(&w.ID, &w.RoomID, &w.Kind, &w.FromUser, &w.Pattern, &w.ThreadID, &w.ReplyTo, &w.Note, &once, &w.TTLS, &w.CreatedAt, &w.ExpiresAt)
+	err := row.Scan(&w.ID, &w.RoomID, &w.Owner, &w.Kind, &w.FromUser, &w.Pattern, &w.ThreadID, &w.ReplyTo, &w.Note, &once, &w.TTLS, &w.CreatedAt, &w.ExpiresAt)
 	if err != nil {
 		return Watch{}, err
 	}

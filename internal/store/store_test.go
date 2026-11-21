@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -99,6 +100,9 @@ func TestWatchCRUD(t *testing.T) {
 	if added.ExpiresAt != testNow.Unix()+86400 {
 		t.Errorf("ExpiresAt = %d, want %d", added.ExpiresAt, testNow.Unix()+86400)
 	}
+	if added.Owner != "resident" {
+		t.Errorf("Owner = %q, want resident (default)", added.Owner)
+	}
 
 	got, err := s.GetWatch(testCtx, added.ID)
 	if err != nil {
@@ -124,6 +128,87 @@ func TestWatchCRUD(t *testing.T) {
 	}
 	if _, err := s.GetWatch(testCtx, added.ID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("GetWatch after delete: err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestWatchOwnerColumn(t *testing.T) {
+	s := openTestStore(t)
+
+	// A custom owner round-trips through AddWatch/GetWatch.
+	added, err := s.AddWatch(testCtx, Watch{ID: "owned", RoomID: "room2", Kind: WatchKindEdge, ReplyTo: "m1", Owner: "agent-x", TTLS: 100}, testNow)
+	if err != nil {
+		t.Fatalf("AddWatch: %v", err)
+	}
+	if added.Owner != "agent-x" {
+		t.Errorf("AddWatch Owner = %q, want agent-x", added.Owner)
+	}
+	got, err := s.GetWatch(testCtx, "owned")
+	if err != nil {
+		t.Fatalf("GetWatch: %v", err)
+	}
+	if got.Owner != "agent-x" {
+		t.Errorf("GetWatch Owner = %q, want agent-x", got.Owner)
+	}
+	list, err := s.ListWatches(testCtx)
+	if err != nil {
+		t.Fatalf("ListWatches: %v", err)
+	}
+	for _, w := range list {
+		if w.ID == "owned" && w.Owner != "agent-x" {
+			t.Errorf("ListWatches Owner = %q, want agent-x", w.Owner)
+		}
+	}
+}
+
+func TestOwnerColumnMigratesLegacyDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	// Create a database with the pre-owner watches schema and one row.
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	_, err = raw.Exec(`CREATE TABLE watches (
+		id TEXT PRIMARY KEY,
+		room_id TEXT NOT NULL,
+		kind TEXT NOT NULL,
+		from_user TEXT,
+		pattern TEXT,
+		thread_id TEXT,
+		reply_to TEXT,
+		note TEXT,
+		once INTEGER NOT NULL DEFAULT 1,
+		ttl_s INTEGER NOT NULL,
+		created_at INTEGER NOT NULL,
+		expires_at INTEGER NOT NULL
+	)`)
+	if err != nil {
+		t.Fatalf("create legacy schema: %v", err)
+	}
+	_, err = raw.Exec(`INSERT INTO watches (id, room_id, kind, from_user, pattern, thread_id, reply_to, note, once, ttl_s, created_at, expires_at)
+		VALUES ('legacy', 'room1', 'edge', '', '', '', 'm1', '', 1, 100, 1000000, 1000100)`)
+	if err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw: %v", err)
+	}
+
+	// Open migrates the owner column in; the legacy row takes the default.
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	w, err := s.GetWatch(testCtx, "legacy")
+	if err != nil {
+		t.Fatalf("GetWatch legacy: %v", err)
+	}
+	if w.Owner != "resident" {
+		t.Errorf("legacy Owner = %q, want resident", w.Owner)
+	}
+	// New writes work on the migrated table.
+	if _, err := s.AddWatch(testCtx, Watch{ID: "new", RoomID: "room1", Kind: WatchKindEdge, ReplyTo: "m2", TTLS: 100}, testNow); err != nil {
+		t.Fatalf("AddWatch on migrated table: %v", err)
 	}
 }
 

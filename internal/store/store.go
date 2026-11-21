@@ -54,6 +54,7 @@ const schema = `
 CREATE TABLE IF NOT EXISTS watches (
   id TEXT PRIMARY KEY,
   room_id TEXT NOT NULL,
+  owner TEXT NOT NULL DEFAULT 'resident',
   kind TEXT NOT NULL,
   from_user TEXT,
   pattern TEXT,
@@ -90,6 +91,39 @@ CREATE TABLE IF NOT EXISTS meta (
 `
 
 func (s *Store) migrate(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, schema)
+	if _, err := s.db.ExecContext(ctx, schema); err != nil {
+		return err
+	}
+	return s.ensureWatchOwner(ctx)
+}
+
+// ensureWatchOwner adds the owner column to the watches table when it is
+// missing (databases created before the column existed). The column is
+// TEXT NOT NULL DEFAULT 'resident'.
+func (s *Store) ensureWatchOwner(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(watches)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasOwner := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == "owner" {
+			hasOwner = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasOwner {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE watches ADD COLUMN owner TEXT NOT NULL DEFAULT 'resident'`)
 	return err
 }
