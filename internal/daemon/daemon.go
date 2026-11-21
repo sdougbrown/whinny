@@ -45,6 +45,9 @@ type Deps struct {
 	// Ticker builds the expiry-sweep tick source. Nil falls back to a
 	// real ticker on ExpirySweepInterval.
 	Ticker func(time.Duration) Ticker
+	// Wait is the pause between history-lookup retries. Nil falls back
+	// to time.Sleep.
+	Wait func(time.Duration)
 }
 
 // daemon is the run-loop state: one connected client, one store, one
@@ -60,6 +63,7 @@ type daemon struct {
 	gate   *wake.AmbientGate
 	class  wake.Classifier
 	hist   *historyCache
+	wait   func(time.Duration)
 }
 
 // Run drives the daemon until ctx is done: it validates the config
@@ -95,6 +99,10 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 	if newTicker == nil {
 		newTicker = newRealTicker
 	}
+	wait := deps.Wait
+	if wait == nil {
+		wait = time.Sleep
+	}
 
 	d := &daemon{
 		cfg:   cfg,
@@ -104,6 +112,7 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 		clock: clock,
 		gate:  newAmbientGate(cfg),
 		class: classifierClient(cfg),
+		wait:  wait,
 	}
 
 	// Reconnect catch-up: when the connection drops and reconnects, the
@@ -325,7 +334,7 @@ func (d *daemon) handleResident(ctx context.Context, m *apronws.Message) {
 		Peers:   d.cfg.Peers,
 		Watches: resident,
 		History: func(ctx context.Context, messageID string) (string, bool, error) {
-			return d.hist.lookup(ctx, m.RoomID, messageID)
+			return d.lookupAuthor(ctx, m.RoomID, messageID)
 		},
 		Classifier: d.class,
 		Gate:       d.gate,
@@ -365,6 +374,29 @@ func (d *daemon) flushQueue(ctx context.Context) {
 			log.Printf("daemon: deliver wake %d: %v", w.ID, err)
 		}
 	}
+}
+
+// lookupAuthor resolves the reply target's author, retrying a failed
+// History lookup up to 3 times (1-second pause between attempts). The
+// room cursor has already advanced, so catch-up will not replay the
+// message; a lost lookup loses the reply wake (at-most-once,
+// documented). The bounded retry narrows the window.
+func (d *daemon) lookupAuthor(ctx context.Context, roomID, messageID string) (string, bool, error) {
+	const maxAttempts = 4
+	var author string
+	var ok bool
+	var err error
+	for attempt := 1; ; attempt++ {
+		author, ok, err = d.hist.lookup(ctx, roomID, messageID)
+		if err == nil || attempt == maxAttempts {
+			break
+		}
+		d.wait(time.Second)
+	}
+	if err != nil {
+		log.Printf("daemon: history lookup for %s failed after %d attempts: %v", messageID, maxAttempts, err)
+	}
+	return author, ok, err
 }
 
 // handleShared routes watch hits to their owners. No mention/reply/ambient

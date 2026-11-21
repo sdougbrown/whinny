@@ -55,6 +55,9 @@ type fakeServer struct {
 	// historyGateHit, when non-nil, is signaled (non-blocking) when a
 	// history request reaches the gate.
 	historyGateHit chan struct{}
+	// historyFailures, when > 0, makes the next N history requests
+	// fail with an error frame (a flaky-transport simulation).
+	historyFailures int
 }
 
 func newFakeServer(t *testing.T) *fakeServer {
@@ -140,7 +143,16 @@ func (f *fakeServer) run(fc *serverConn) {
 			f.mu.Lock()
 			msgs := f.historyByRoom[p.RoomID]
 			gate := f.historyGate
+			fail := f.historyFailures > 0
+			if fail {
+				f.historyFailures--
+			}
 			f.mu.Unlock()
+			if fail {
+				errReply, _ := json.Marshal(map[string]any{"id": fr.ID, "error": map[string]any{"code": -32000, "message": "history flake"}})
+				fc.write(errReply)
+				continue
+			}
 			if gate != nil {
 				select {
 				case f.historyGateHit <- struct{}{}:
@@ -376,6 +388,7 @@ func startHarness(t *testing.T, cfg Config) *harness {
 		Clock:   h.clock,
 		Now:     h.clock.Now,
 		Ticker:  func(time.Duration) Ticker { return h.ticker },
+		Wait:    func(time.Duration) {},
 	}
 	go func() { h.done <- Run(ctx, cfg, deps) }()
 	t.Cleanup(h.cancel)
@@ -976,6 +989,14 @@ func (f *fakeServer) setCatchUp(rooms []map[string]any, historyByRoom map[string
 	f.historyByRoom = historyByRoom
 }
 
+// setHistoryFailures makes the next n history requests fail with an
+// error frame.
+func (f *fakeServer) setHistoryFailures(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.historyFailures = n
+}
+
 // startHarnessWithSetup is like startHarness but calls setup (to
 // configure the fake server) after the client connects and before Run
 // starts, so the startup catch-up sees the configured responses.
@@ -1020,6 +1041,7 @@ func startHarnessWithSetup(t *testing.T, cfg Config, setup func(*harness)) *harn
 		Clock:   h.clock,
 		Now:     h.clock.Now,
 		Ticker:  func(time.Duration) Ticker { return h.ticker },
+		Wait:    func(time.Duration) {},
 	}
 	go func() { h.done <- Run(ctx, cfg, deps) }()
 	t.Cleanup(h.cancel)
@@ -1347,6 +1369,39 @@ func TestHistoryCacheMissFallsBackToHistory(t *testing.T) {
 	d := h.dlv.wait(t)
 	if !strings.Contains(d.env.Text, "kind=reply") {
 		t.Errorf("reply envelope = %q, want a reply wake (author from the History fallback)", d.env.Text)
+	}
+	h.stop(t)
+}
+
+// TestReplyWakeRetriesFailedHistoryLookup: a reply-to-my-message wake
+// whose History lookup fails twice is still delivered: the lookup is
+// retried (the injected pause is a no-op), and the third attempt
+// resolves the author.
+func TestReplyWakeRetriesFailedHistoryLookup(t *testing.T) {
+	cfg := baseCfg()
+	h := startHarness(t, cfg)
+	h.srv.setCatchUp(
+		nil,
+		map[string][]map[string]any{
+			"r1": {{
+				"message_id": "m100", "log_id": 100, "room_id": "r1",
+				"from": map[string]any{"user_id": "u9", "name": "squire"},
+				"body": map[string]any{"text": "bot post from history"},
+			}},
+		},
+	)
+	h.srv.setHistoryFailures(2)
+	// A reply to m100 (not in the stream): the History fallback fails
+	// twice, then succeeds on the retry.
+	h.fc.push("message", map[string]any{
+		"message_id": "m101", "log_id": 101, "room_id": "r1",
+		"from":     map[string]any{"user_id": "doug", "name": "doug"},
+		"body":     map[string]any{"text": "reply to history"},
+		"reply_to": map[string]any{"message_id": "m100"},
+	})
+	d := h.dlv.wait(t)
+	if !strings.Contains(d.env.Text, "kind=reply") {
+		t.Errorf("reply envelope = %q, want a reply wake (lookup retried past two failures)", d.env.Text)
 	}
 	h.stop(t)
 }
