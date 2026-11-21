@@ -56,11 +56,13 @@ type GuardInput struct {
 	Now time.Time
 }
 
-// Chain evaluates guards in fixed order (breaker, rate-limit, quiet); the
+// Chain evaluates guards in fixed order (breaker, quiet, rate-limit); the
 // first denial wins. Evaluate decides without side effects and consumes a
 // bucket token only when the send is allowed, so a denial never drains
-// the bucket. The chain owns the default rate bucket built from the
-// config, so bucket state persists across Evaluate calls.
+// the bucket. Quiet is checked before the rate take precisely so a
+// quiet denial never consumes a token. The chain owns the default rate
+// bucket built from the config, so bucket state persists across
+// Evaluate calls.
 type Chain struct {
 	bucket *RateBucket
 }
@@ -70,9 +72,9 @@ func NewChain(cfg Config) *Chain {
 	return &Chain{bucket: NewRateBucket(cfg)}
 }
 
-// Evaluate runs the guards in precedence order (breaker, rate-limit,
-// quiet) without side effects and returns the first denial, if any. When
-// the send is allowed it consumes one bucket token.
+// Evaluate runs the guards in precedence order (breaker, quiet,
+// rate-limit) without side effects and returns the first denial, if any.
+// When the send is allowed it consumes one bucket token.
 func (c *Chain) Evaluate(in GuardInput) (Denial, bool) {
 	if d, denied := checkBreaker(in); denied {
 		return d, true
@@ -144,10 +146,6 @@ type RateBucket struct {
 	cap    float64
 	refill time.Duration
 	last   time.Time
-	// onTake, when set, is called after every successful Take with the
-	// bucket's current state; the hook's error is dropped (the in-memory
-	// state stays authoritative for the process).
-	onTake func(tokens float64, last time.Time) error
 	// takeFn, when set, makes the take perform the (refill, take,
 	// persist) as one atomic operation. This is the store-backed path
 	// (NewStoreBucket): the check and the consume are one transaction, so
@@ -171,42 +169,13 @@ func NewRateBucket(cfg Config) *RateBucket {
 	}
 }
 
-// NewPersistedBucket builds a RateBucket whose state loads at
-// construction and saves after each successful Take. A load error or a
-// never-set state (a zero last instant) leaves the bucket full; a save
-// error is dropped (the in-memory state stays authoritative for the
-// process). The bucket is a RateBucket, so it satisfies whatever the
-// chain's GuardInput.Bucket expects.
-//
-// Deprecated: the load-then-save shape is two steps, so N concurrent
-// callers can each read a full bucket and all pass a perMinute limit,
-// and a save failure is dropped (fail open). Use NewStoreBucket for the
-// atomic, fail-closed path; this constructor is kept working for callers
-// that cannot yet move.
-func NewPersistedBucket(load func() (float64, time.Time, error), save func(float64, time.Time) error, perMinute int) *RateBucket {
-	b := NewRateBucket(Config{PerMinute: perMinute})
-	if tokens, last, err := load(); err == nil && !last.IsZero() {
-		b.mu.Lock()
-		b.tokens = tokens
-		b.last = last
-		b.mu.Unlock()
-	}
-	b.onTake = func(tokens float64, last time.Time) error {
-		if save == nil {
-			return nil
-		}
-		return save(tokens, last)
-	}
-	return b
-}
-
 // NewStoreBucket builds a RateBucket backed by the store's atomic
 // TakeRateToken: the (refill, take, persist) is one BEGIN IMMEDIATE
 // transaction, so N concurrent callers can never all pass a perMinute
 // limit, and a persistence error denies (fail closed) with a 1s
-// retry-after. The take happens in CanServe (before the quiet check),
-// so a quiet denial consumes a token — the cost of atomicity. The store
-// call runs on context.Background: the bucket's API carries no context.
+// retry-after. The chain checks quiet before the rate take precisely
+// so a quiet denial never consumes a token. The store call runs on
+// context.Background: the bucket's API carries no context.
 func NewStoreBucket(s *store.Store, perMinute int) *RateBucket {
 	b := NewRateBucket(Config{PerMinute: perMinute})
 	b.takeFn = func(now time.Time) (bool, time.Duration, error) {
@@ -257,9 +226,6 @@ func (b *RateBucket) Take(now time.Time) (bool, time.Duration) {
 	b.refillTo(now)
 	if b.tokens >= 1-1e-9 {
 		b.tokens--
-		if b.onTake != nil {
-			b.onTake(b.tokens, b.last)
-		}
 		return true, 0
 	}
 	return false, time.Duration((1 - b.tokens) * b.refill.Seconds() * float64(time.Second))

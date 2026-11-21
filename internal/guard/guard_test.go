@@ -2,7 +2,6 @@ package guard
 
 import (
 	"context"
-	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -220,115 +219,6 @@ func TestQuietBoundary(t *testing.T) {
 	in = fresh()
 	if d, denied := chain.Evaluate(in); denied {
 		t.Errorf("QuietUntil 0 denied: %+v", d)
-	}
-}
-
-// TestBreakerFromReopenedStore feeds the persisted breaker state from a
-// store that was closed and reopened into the chain.
-// TestPersistedBucketLoadAndSave: the bucket loads its state at
-// construction and saves after each successful Take.
-func TestPersistedBucketLoadAndSave(t *testing.T) {
-	// A persisted state: 1 token left, last refill 30s before t0.
-	loaded := false
-	b := NewPersistedBucket(
-		func() (float64, time.Time, error) {
-			loaded = true
-			return 1, t0.Add(-30 * time.Second), nil
-		},
-		func(tokens float64, last time.Time) error {
-			return nil
-		},
-		2,
-	)
-	if !loaded {
-		t.Fatal("load was not called at construction")
-	}
-	// 30s of refill (1 token per 30s) tops the 1-token state to the
-	// 2-token cap, so the first Take at t0 succeeds.
-	if ok, _ := b.Take(t0); !ok {
-		t.Fatal("Take t0 failed, want the refilled token")
-	}
-	// The second Take drains the bucket.
-	if ok, _ := b.Take(t0); !ok {
-		t.Fatal("Take t0 (2nd) failed")
-	}
-	// The third is denied: the bucket is empty.
-	if ok, _ := b.Take(t0); ok {
-		t.Fatal("Take t0 (3rd) succeeded, want denied")
-	}
-}
-
-// TestPersistedBucketSaveAfterTake: a successful Take persists the
-// consumed state through the save hook.
-func TestPersistedBucketSaveAfterTake(t *testing.T) {
-	var saved []struct {
-		tokens float64
-		last   time.Time
-	}
-	b := NewPersistedBucket(
-		func() (float64, time.Time, error) { return 2, time.Time{}, nil },
-		func(tokens float64, last time.Time) error {
-			saved = append(saved, struct {
-				tokens float64
-				last   time.Time
-			}{tokens, last})
-			return nil
-		},
-		2,
-	)
-	if ok, _ := b.Take(t0); !ok {
-		t.Fatal("Take t0 failed")
-	}
-	if len(saved) != 1 {
-		t.Fatalf("save calls = %d, want 1", len(saved))
-	}
-	if saved[0].tokens != 1 {
-		t.Errorf("saved tokens = %v, want 1 (one consumed from a full 2-bucket)", saved[0].tokens)
-	}
-	if !saved[0].last.Equal(t0) {
-		t.Errorf("saved last = %v, want t0", saved[0].last)
-	}
-	// A denied Take does not save.
-	if ok, _ := b.Take(t0); !ok {
-		t.Fatal("Take t0 (2nd) failed")
-	}
-	if ok, _ := b.Take(t0); ok {
-		t.Fatal("Take t0 (3rd) succeeded, want denied")
-	}
-	if len(saved) != 2 {
-		t.Errorf("save calls after a denied Take = %d, want 2 (no save on denial)", len(saved))
-	}
-}
-
-// TestPersistedBucketLoadErrorLeavesFull: a load error leaves the
-// bucket full (the fresh NewRateBucket state).
-func TestPersistedBucketLoadErrorLeavesFull(t *testing.T) {
-	b := NewPersistedBucket(
-		func() (float64, time.Time, error) { return 0, time.Time{}, errors.New("no state") },
-		func(float64, time.Time) error { return nil },
-		2,
-	)
-	if ok, _ := b.Take(t0); !ok {
-		t.Fatal("Take t0 failed, want the full bucket to admit a token")
-	}
-	if ok, _ := b.Take(t0); !ok {
-		t.Fatal("Take t0 (2nd) failed, want the full bucket to admit a token")
-	}
-}
-
-// TestPersistedBucketSaveErrorDropped: a save error is dropped; the
-// in-memory state stays authoritative and the bucket keeps working.
-func TestPersistedBucketSaveErrorDropped(t *testing.T) {
-	b := NewPersistedBucket(
-		func() (float64, time.Time, error) { return 2, time.Time{}, nil },
-		func(float64, time.Time) error { return errors.New("disk full") },
-		2,
-	)
-	if ok, _ := b.Take(t0); !ok {
-		t.Fatal("Take t0 failed despite a save error")
-	}
-	if ok, _ := b.Take(t0); !ok {
-		t.Fatal("Take t0 (2nd) failed despite a save error")
 	}
 }
 

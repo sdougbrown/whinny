@@ -1,7 +1,7 @@
 // Package guard is the send-path guard for the whinny link daemon: before
-// a message is sent, the chain checks the breaker latch, the token-bucket
-// rate limit, and the room's quiet state, in that order — first denial
-// wins.
+// a message is sent, the chain checks the breaker latch, the room's
+// quiet state, and the token-bucket rate limit, in that order — first
+// denial wins.
 //
 // Evaluate decides without side effects and consumes a bucket token only
 // when the send is allowed, so a denial never drains the bucket. A
