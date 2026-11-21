@@ -62,3 +62,56 @@ func TestBumpPostFailuresConcurrent(t *testing.T) {
 		t.Fatalf("count = %d, want %d (no lost increments)", n, goroutines*bumps+1)
 	}
 }
+
+// TestClearBreaker: ClearBreaker releases the latch and resets the
+// counter in one transaction: a latched store with a trip counter
+// comes back clean, and a retried clear is idempotent. (The
+// transaction's atomicity itself is not cheaply assertable here —
+// the assertion follows the existing pattern: one call, both writes
+// landed.)
+func TestClearBreaker(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.SetBreaker(testCtx, Breaker{Latched: true, LatchedAt: 42, Reason: "test"}); err != nil {
+		t.Fatalf("SetBreaker: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := s.BumpPostFailures(testCtx); err != nil {
+			t.Fatalf("BumpPostFailures %d: %v", i+1, err)
+		}
+	}
+	if err := s.ClearBreaker(testCtx); err != nil {
+		t.Fatalf("ClearBreaker: %v", err)
+	}
+	b, err := s.GetBreaker(testCtx)
+	if err != nil {
+		t.Fatalf("GetBreaker: %v", err)
+	}
+	if b != (Breaker{}) {
+		t.Errorf("GetBreaker after clear = %+v, want zero (not latched)", b)
+	}
+	v, err := s.GetMeta(testCtx, MetaPostFailures)
+	if err != nil {
+		t.Fatalf("GetMeta: %v", err)
+	}
+	if v != "0" {
+		t.Errorf("post_failures = %q, want 0 after the clear", v)
+	}
+	// A retried clear is idempotent.
+	if err := s.ClearBreaker(testCtx); err != nil {
+		t.Fatalf("ClearBreaker again: %v", err)
+	}
+	b, err = s.GetBreaker(testCtx)
+	if err != nil {
+		t.Fatalf("GetBreaker after retried clear: %v", err)
+	}
+	if b != (Breaker{}) {
+		t.Errorf("GetBreaker after retried clear = %+v, want zero", b)
+	}
+	v, err = s.GetMeta(testCtx, MetaPostFailures)
+	if err != nil {
+		t.Fatalf("GetMeta after retried clear: %v", err)
+	}
+	if v != "0" {
+		t.Errorf("post_failures = %q, want 0 after the retried clear", v)
+	}
+}

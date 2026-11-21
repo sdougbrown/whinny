@@ -5,7 +5,6 @@ import (
 	"io"
 
 	"github.com/sdougbrown/cli-contract"
-	"github.com/sdougbrown/whinny/internal/store"
 )
 
 // BreakerClearHandler runs `whinny breaker-clear`: it releases the
@@ -20,10 +19,7 @@ func BreakerClearHandler(d Deps) clicontract.HandleFunc {
 		if owned {
 			defer st.Close()
 		}
-		if err := st.SetBreaker(ctx, store.Breaker{}); err != nil {
-			return nil, OperationalErrorf("breaker-clear: %v", err)
-		}
-		if err := st.ResetPostFailures(ctx); err != nil {
+		if err := st.ClearBreaker(ctx); err != nil {
 			return nil, OperationalErrorf("breaker-clear: %v", err)
 		}
 		return "breaker cleared: the latch is released and the failure counter reset", nil

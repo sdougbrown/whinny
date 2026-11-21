@@ -93,3 +93,30 @@ func (s *Store) ResetPostFailures(ctx context.Context) error {
 		MetaPostFailures)
 	return err
 }
+
+// ClearBreaker releases the breaker latch and resets the consecutive
+// post-failure counter in one transaction: the two writes are atomic,
+// so a failure between them can never leave a cleared latch with a
+// live counter (or a latched breaker with a stale count). A retried
+// clear is idempotent.
+func (s *Store) ClearBreaker(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO breaker (id, latched, latched_at, reason) VALUES (1, 0, NULL, '')
+		 ON CONFLICT(id) DO UPDATE SET latched = 0, latched_at = NULL, reason = ''`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO meta (key, value) VALUES (?, '0')
+		 ON CONFLICT(key) DO UPDATE SET value = '0'`,
+		MetaPostFailures); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
