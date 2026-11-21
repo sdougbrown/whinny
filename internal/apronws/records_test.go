@@ -80,6 +80,34 @@ func TestDecodePush(t *testing.T) {
 			},
 		},
 		{
+			// §2.1: a log_id is a decimal string of Unix epoch milliseconds
+			// on the wire; the decoder accepts the string shape and a bare
+			// number.
+			name:   "message with decimal-string log_id",
+			method: "message",
+			data: `{"message_id":"1724803200042","log_id":"1724803200042","prev_log_id":"1724803200041","room_id":"r1",
+				"from":{"user_id":"u1","name":"Ann"},
+				"body":{"text":"hello"}}`,
+			wantKind: KindMessage,
+			wantOK:   true,
+			check: func(t *testing.T, rec Record) {
+				m := rec.Message
+				if m.LogID != 1724803200042 {
+					t.Errorf("LogID = %d, want 1724803200042", m.LogID)
+				}
+				if m.PrevLogID == nil || *m.PrevLogID != 1724803200041 {
+					t.Errorf("PrevLogID = %v, want 1724803200041", m.PrevLogID)
+				}
+			},
+		},
+		{
+			name:     "message with an unparseable log_id",
+			method:   "message",
+			data:     `{"message_id":"m1","log_id":"soon","room_id":"r1","from":{"user_id":"u1"}}`,
+			wantKind: 0,
+			wantOK:   false,
+		},
+		{
 			name:     "room_update",
 			method:   "room_update",
 			data:     `{"kind":"joined","room_id":"r2"}`,

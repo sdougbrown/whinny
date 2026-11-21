@@ -94,7 +94,7 @@ func filterByCursor(msgs []apronws.Message, cursorID string, newer bool) ([]apro
 	found := false
 	for _, m := range msgs {
 		if m.MessageID == cursorID {
-			cursorLog = m.LogID
+			cursorLog = int64(m.LogID)
 			found = true
 			break
 		}
@@ -104,7 +104,7 @@ func filterByCursor(msgs []apronws.Message, cursorID string, newer bool) ([]apro
 	}
 	out := make([]apronws.Message, 0, len(msgs))
 	for _, m := range msgs {
-		if (newer && m.LogID > cursorLog) || (!newer && m.LogID < cursorLog) {
+		if (newer && int64(m.LogID) > cursorLog) || (!newer && int64(m.LogID) < cursorLog) {
 			out = append(out, m)
 		}
 	}
@@ -114,7 +114,7 @@ func filterByCursor(msgs []apronws.Message, cursorID string, newer bool) ([]apro
 func projectMessage(m apronws.Message) historyMessage {
 	out := historyMessage{
 		MessageID: m.MessageID,
-		LogID:     m.LogID,
+		LogID:     int64(m.LogID),
 		RoomID:    m.RoomID,
 		From:      m.From,
 		Deleted:   m.Deleted,

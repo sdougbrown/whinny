@@ -199,7 +199,7 @@ type HistoryParams struct {
 type HistoryResult struct {
 	Messages    []Message       `json:"messages"`
 	Rooms       json.RawMessage `json:"rooms,omitempty"`
-	LatestLogID int64           `json:"latest_log_id"`
+	LatestLogID LogID           `json:"latest_log_id"`
 	Raw         json.RawMessage
 }
 
@@ -221,7 +221,7 @@ func (c *Client) History(ctx context.Context, p HistoryParams) (HistoryResult, e
 type RoomListParams struct {
 	Filter      string          `json:"filter,omitempty"`
 	Members     json.RawMessage `json:"members,omitempty"`
-	LatestLogID int64           `json:"latest_log_id,omitempty"`
+	LatestLogID LogID           `json:"latest_log_id,omitempty"`
 }
 
 // Room is a room as reported by room_list and room_set. Fields the

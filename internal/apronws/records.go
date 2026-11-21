@@ -1,9 +1,39 @@
 package apronws
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"strconv"
 	"time"
 )
+
+// LogID is a position in the server's append-only log (§2.1): a decimal
+// string of Unix epoch milliseconds on the wire, an int64 in Go. The
+// decoder accepts the string shape the protocol names and a bare number.
+type LogID int64
+
+func (l *LogID) UnmarshalJSON(data []byte) error {
+	s := string(bytes.TrimSpace(data))
+	if s == "null" {
+		return nil
+	}
+	// A JSON string keeps its quotes; strip one pair.
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		s = s[1 : len(s)-1]
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return fmt.Errorf("log_id must be a decimal string: %w", err)
+	}
+	*l = LogID(n)
+	return nil
+}
+
+// MarshalJSON emits the wire shape: a decimal string.
+func (l LogID) MarshalJSON() ([]byte, error) {
+	return []byte(strconv.Quote(strconv.FormatInt(int64(l), 10))), nil
+}
 
 // Kind discriminates the payload carried by a Record.
 type Kind int
@@ -61,8 +91,8 @@ func decodeServerInfo(data []byte) (ServerInfo, error) {
 // and Ext; at equal LogID a tombstone wins over the message it replaces.
 type Message struct {
 	MessageID string `json:"message_id"`
-	LogID     int64  `json:"log_id"`
-	PrevLogID *int64 `json:"prev_log_id"`
+	LogID     LogID  `json:"log_id"`
+	PrevLogID *LogID `json:"prev_log_id"`
 	RoomID    string `json:"room_id"`
 	From      From   `json:"from"`
 	// Body is nil for a delete tombstone.

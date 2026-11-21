@@ -191,7 +191,7 @@ func (d *daemon) handleRecord(ctx context.Context, rec apronws.Record, subscribe
 		return
 	}
 	m := rec.Message
-	if err := d.store.SetCursor(ctx, m.RoomID, m.LogID); err != nil {
+	if err := d.store.SetCursor(ctx, m.RoomID, int64(m.LogID)); err != nil {
 		log.Printf("daemon: set cursor %s: %v", m.RoomID, err)
 	}
 	// A delete tombstone carries no body: nothing to evaluate, and the
