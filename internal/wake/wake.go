@@ -36,12 +36,15 @@ type Embed struct {
 	Caption string
 }
 
-// Msg is the inbound message record evaluated by the policy.
+// Msg is the inbound message record evaluated by the policy. MessageID
+// is the triggering message's id; the policy ignores it, and the
+// envelope builder carries it into the wake header.
 type Msg struct {
-	RoomID   string
-	From     From
-	Text     string
-	Mentions []string
+	MessageID string
+	RoomID    string
+	From      From
+	Text      string
+	Mentions  []string
 	// ReplyTo is the message_id of reply_to, "" when absent.
 	ReplyTo string
 	Embeds  []Embed
