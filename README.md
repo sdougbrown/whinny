@@ -15,7 +15,7 @@ single outbound surface (`whinny post`): every post runs the guard chain —
 persisted rate bucket, breaker, quiet gate — and refusals come back as typed
 denials (`refused-rate-limit`, `refused-breaker`, `refused-quiet`), never as prompt
 machinery. The breaker trips on five consecutive bad send outcomes (rate-limit
-denials or failed posts) and latches until `whinny breaker-clear` releases it.
+denials or failed posts) and latches until `whinny breaker-clear` releases it. Usage errors — like a misspelled room — are never bad send outcomes: they refund the rate token and do not count toward the trip.
 
 whinny speaks [Apron](https://github.com/shazow/apron) protocol v9 over
 WebSockets (`internal/apronws`) and keeps its state in one SQLite database
