@@ -119,11 +119,10 @@ type Decision struct {
 //   - human sender: reply-to-my-message, then watch matches, then the
 //     ambient gate (only when nothing above fired).
 //
-// Every matching watch fires: all of them appear in Decision.Watches and
-// their once-ids in Decision.RemoveWatchIDs, whatever the winning kind.
-// Kind is the highest-priority fired path (mention > reply > watch >
-// ambient); Wake is true if any path fired; Reason comes from the
-// primary path.
+// Watch hits ride along on reply and watch wakes (the mention path
+// short-circuits first, matching the reference). Kind is the
+// highest-priority fired path (mention > reply > watch > ambient); Wake
+// is true if any path fired; Reason comes from the primary path.
 func Evaluate(ctx context.Context, in In) Decision {
 	if name, ok := mentioned(in.Self, in.Msg); ok {
 		return Decision{Wake: true, Kind: KindMention, Reason: `mentioned "` + name + `"`}
