@@ -330,7 +330,9 @@ func TestSlackTransportForcesAmbientOff(t *testing.T) {
 	cfg.BotToken, cfg.AppToken = "xoxb-test", "xapp-test"
 	cfg.Ambient = AmbientConfig{Endpoint: classifier.URL, MinSpacing: time.Minute, MaxPerHour: 2}
 	link, h := startLinkHarness(t, cfg, nil)
+	link.mu.Lock()
 	link.rooms = nil // no catch-up noise
+	link.mu.Unlock()
 
 	link.push(msgEvent("r1", "doug", "anyone around?", 100))
 	link.push(msgEvent("r1", "doug", "still there?", 101))
