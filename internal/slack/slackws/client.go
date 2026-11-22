@@ -225,13 +225,29 @@ func (c *Client) readLoop() {
 			continue
 		}
 		var probe struct {
-			Type string `json:"type"`
+			Type  string          `json:"type"`
+			Event json.RawMessage `json:"event"`
 		}
 		if err := json.Unmarshal(env.Payload, &probe); err != nil {
 			continue
 		}
+		// A real events_api payload is a wrapper:
+		// {"type":"event_callback","event":{...}} — the event's own
+		// type lives under "event". Unwrap it; a malformed wrapper
+		// (no inner type) is dropped. Payloads without the wrapper
+		// (bare events, as test fakes may emit) pass through.
+		evType, payload := probe.Type, env.Payload
+		if probe.Type == "event_callback" {
+			var inner struct {
+				Type string `json:"type"`
+			}
+			if len(probe.Event) == 0 || json.Unmarshal(probe.Event, &inner) != nil || inner.Type == "" {
+				continue
+			}
+			evType, payload = inner.Type, probe.Event
+		}
 		select {
-		case c.records <- Event{Type: probe.Type, Payload: env.Payload, EnvelopeID: env.EnvelopeID}:
+		case c.records <- Event{Type: evType, Payload: payload, EnvelopeID: env.EnvelopeID}:
 		case <-c.ctx.Done():
 			return
 		}

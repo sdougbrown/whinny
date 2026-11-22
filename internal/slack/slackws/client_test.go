@@ -100,12 +100,17 @@ func sendJSON(ctx context.Context, t *testing.T, conn *websocket.Conn, v any) {
 	}
 }
 
-func envelope(id string, payload any) map[string]any {
-	raw, err := json.Marshal(payload)
+// envelope builds a realistic events_api envelope: the payload is the
+// event_callback wrapper with the event nested under "event".
+func envelope(id string, event any) map[string]any {
+	raw, err := json.Marshal(event)
 	if err != nil {
 		panic(err)
 	}
-	return map[string]any{"type": "events_api", "envelope_id": id, "payload": json.RawMessage(raw)}
+	return map[string]any{"type": "events_api", "envelope_id": id, "payload": map[string]any{
+		"type":  "event_callback",
+		"event": json.RawMessage(raw),
+	}}
 }
 
 func readEvent(ctx context.Context, t *testing.T, records <-chan Event) Event {
@@ -333,6 +338,28 @@ func TestCloseAndContextCancel(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for records to close")
+	}
+}
+
+func TestBareEventPassThrough(t *testing.T) {
+	ws := newWSServer(t)
+	api := newOpenFake(t, ws.url)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	c, err := Connect(ctx, Options{AppToken: "xapp-test", BaseURL: api.ts.URL})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer c.Close()
+	conn := <-ws.conns
+
+	// A payload without the event_callback wrapper (a bare event) is
+	// not unwrapped: it passes through as-is.
+	sendJSON(ctx, t, conn, map[string]any{"type": "events_api", "envelope_id": "e9", "payload": map[string]any{"type": "message", "ts": "1.9"}})
+	ev := readEvent(ctx, t, c.Records())
+	if ev.Type != "message" || ev.EnvelopeID != "e9" {
+		t.Fatalf("event = %+v, want bare message e9", ev)
 	}
 }
 
