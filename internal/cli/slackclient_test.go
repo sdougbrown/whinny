@@ -65,7 +65,7 @@ func newFakeSlackAPI(t *testing.T) (*fakeSlackAPI, *slack.Client) {
 			w.Write([]byte(`{"ok":true,"channels":[
 				{"id":"C1","name":"general","is_member":true},
 				{"id":"C2","name":"random","is_member":false},
-				{"id":"D123","name":"","is_member":false}
+				{"id":"D123","name":"","is_member":false,"is_im":true}
 			]}`))
 		case "/conversations.history":
 			var p struct {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"log"
 	"sort"
-	"strings"
 	"sync"
 
 	"github.com/sdougbrown/whinny/internal/apronws"
@@ -78,7 +77,7 @@ func (c *SlackClient) RoomList(ctx context.Context, _ apronws.RoomListParams) (a
 		}
 		for _, ch := range res.Channels {
 			room := apronws.Room{ID: ch.ID, Title: ch.Name}
-			if ch.IsMember || strings.HasPrefix(ch.ID, "D") {
+			if ch.IsMember || ch.IsIM {
 				joined = append(joined, room)
 			} else {
 				notJoined = append(notJoined, room)
