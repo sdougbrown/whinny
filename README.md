@@ -1,24 +1,30 @@
 # whinny
 
-**whinny is the apron link daemon and CLI — the room is a tool, not the I/O
-surface.** The agent loop stays orthogonal to the chat room: silence is the
-default, a post is an explicit act through one guarded send path, and the room
-wakes the agent only when the wake policy says so.
+**whinny is the apron link daemon and CLI.** The room is a tool, not the I/O
+surface. The agent works through the whinny CLI tools and a wake feed, never
+through a continuous stream. The agent loop stays orthogonal to the chat
+room. Silence is the default; a post is an explicit act through one guarded
+send path. The room wakes the agent only when the wake policy says so.
 
-One paragraph of architecture: the **wake layer** evaluates every inbound room
-message against deterministic rules — mention, reply-to-my-message, registered
-watches, and one ambient gate — and never decides whether the agent replies,
-only whether it wakes. The **policy** is where the ack-storm firebreak lives:
-a bot's own traffic only evaluates watches, never wakes anyone by its posts,
-and a `peers` map distinguishes bots from humans. The **send path** is the
-single outbound surface (`whinny post`): every post runs the guard chain —
-persisted rate bucket, breaker, quiet gate — and refusals come back as typed
-denials (`refused-rate-limit`, `refused-breaker`, `refused-quiet`), never as prompt
-machinery. The breaker trips on five consecutive bad send outcomes (rate-limit
-denials or failed posts) and latches until `whinny breaker-clear` releases it. Usage errors — like a misspelled room — are never bad send outcomes: they refund the rate token and do not count toward the trip.
+The architecture has three layers. The **wake layer** evaluates every inbound
+room message against deterministic rules: mention, reply-to-my-message,
+registered watches, and one ambient gate. It decides only whether the agent
+wakes, never whether it replies. The **policy** holds the ack-storm
+firebreak: a bot's own traffic only evaluates watches, and a `peers` map
+distinguishes bots from humans. The **send path** is the single outbound
+surface (`whinny post`). Every post runs the guard chain — persisted rate
+bucket, breaker, quiet gate — and refusals come back as typed denials
+(`refused-rate-limit`, `refused-breaker`, `refused-quiet`), never as prompt
+machinery.
 
-whinny speaks [Apron](https://github.com/shazow/apron) protocol v9 over
-WebSockets (`internal/apronws`) and keeps its state in one SQLite database
+The breaker trips after five consecutive bad send outcomes, such as
+rate-limit denials or failed posts, and stays latched until `whinny
+breaker-clear` releases it. Usage errors, such as a misspelled room, are not
+bad send outcomes: they refund the rate token and do not count toward the
+trip.
+
+whinny uses the [Apron](https://github.com/shazow/apron) protocol v9 over
+WebSockets (`internal/apronws`) and keeps its state in a SQLite database
 (`internal/store`).
 
 ## Quickstart
@@ -92,7 +98,7 @@ Common flags on every command: `--url <endpoint>` (`$WHINNY_URL`, then
 
 ## Daemon
 
-**Resident mode** is the full wake policy for one resident identity: it holds
+**Resident mode** is the full wake policy for one resident identity. It holds
 the apron connection, evaluates every inbound message, and delivers wakes
 through the configured backend. Fired wakes are enqueued in the wake queue
 and delivered immediately. Delivery is at-most-once: the queue only
@@ -188,8 +194,105 @@ default 20).
 [cli-registry](https://github.com/sdougbrown/cli-contract) manifest (commands,
 flags, output modes), and `whinny schema` prints the full schema document. A
 host that embeds the manifest — poo's registry does — can drive whinny's
-commands without hardcoding them, so the room shows up to agents as plain
+commands without hardcoding them. The room shows up to agents as plain
 tools.
+
+## Wiring an agent
+
+The daemon delivers wakes; the agent acts on the room only through the CLI
+tools. What changes per harness is how wakes arrive and which tool surface
+the model sees.
+
+### poo (feed mode)
+
+1. Run the daemon in feed mode as a poo feed, and give the session the
+   tool manifests:
+
+   ```sh
+   whinny daemon --deliver feed --config /etc/whinny/daemon.json
+   ```
+
+   with a feed manifest in the poo feed shape:
+
+   ```json
+   {
+     "version": 1,
+     "feeds": {
+       "whinny": {
+         "description": "Apron room wakes; act on them with the whinny tools.",
+         "command": ["whinny", "daemon", "--deliver", "feed",
+                     "--config", "/etc/whinny/daemon.json"],
+         "env": {"APRON_TOKEN": "env:APRON_TOKEN"},
+         "restart": true,
+         "on_idle": "wake"
+       }
+     }
+   }
+   ```
+
+   Wakes arrive as `feed:whinny` records (`{"text", "from"}`); `on_idle:
+   "wake"` lets one start a run on an idle session. The feed command's
+   environment is the scrubbed environment plus the manifest's `env`
+   entries, so `env:APRON_TOKEN` keeps the token out of every session log.
+
+2. Point the settings' `cli_registry.paths` (or `POO_CLI_REGISTRY_PATH`, or
+   `--cli-registry-path`) at a file holding `whinny manifest` output, so the
+   model gets `whinny-post`, `whinny-watch-add` and the rest as typed tools.
+
+3. The profile declares `feeds: [whinny]` as a presence assertion; prompts
+   should say replies are `whinny-post` calls and silence is the default —
+   the room never sees unprompted output.
+
+### pi-durable (resident, session-resume delivery)
+
+1. Enroll a bot identity (below) and run the daemon:
+
+   ```sh
+   whinny daemon --deliver exec --exec-cmd /usr/local/bin/resume-whinny
+   ```
+
+   `resume-whinny` owns the session semantics: it resumes the durable
+   session and feeds it the wake envelope on stdin (plain text, the shape
+   `pi --resume <session>` expects).
+
+2. The durable session keeps its conversational context across wakes; its
+   prompt reads wakes as events to act on through the whinny tools.
+3. Watches are conversation state: they do not survive a session rotation,
+   so an agent relying on one re-arms it (`whinny watch add`) after the wake
+   that mattered.
+
+### One-shot and transient agents (shared mode)
+
+One daemon in shared mode serves transient identities. Watches registered
+with a delivery callback outlive the run that registered them. Shared mode
+still validates like any daemon, so the config file must set `self` and a
+usable delivery backend (a shared daemon only delivers to owner callbacks,
+so `feed` costs nothing):
+
+```sh
+whinny daemon --mode shared --config /etc/whinny/shared.json
+whinny watch add --room general --pattern "build done" \
+  --owner ci-runner --on-fire /usr/local/bin/notify-ci-runner
+```
+
+with `/etc/whinny/shared.json` carrying `"mode": "shared"`, a non-empty
+`"self": {"user_id": ..., "name": ...}`, and `"deliver": "feed"`. Shared
+mode has no wake policy: only registered watches fire, each to its own
+owner's callback.
+
+### MCP-capable harnesses
+
+`cli-registry-mcp -registry <dir>` (in the cli-registry repo) serves the
+manifests in a directory as MCP tools over stdio (`-transport http -addr
+...` for HTTP), so any MCP client gets the whinny tool family without
+harness-specific code.
+
+### Enrolling an identity
+
+`aprond` signs identities in through the email ceremony: propose an email,
+read the six-digit code from the server log, approve.
+`e2e/aprontool` speaks those raw frames and `e2e/run.sh` is the worked
+example; the live flow uses the same steps against the real server.
 
 ## End-to-end test
 
