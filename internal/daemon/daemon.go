@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/sdougbrown/whinny/internal/apronws"
+	"github.com/sdougbrown/whinny/internal/slack"
+	"github.com/sdougbrown/whinny/internal/slack/slackws"
 	"github.com/sdougbrown/whinny/internal/store"
 	"github.com/sdougbrown/whinny/internal/wake"
 	"github.com/sdougbrown/whinny/internal/watch"
@@ -135,6 +137,24 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 	switch {
 	case deps.Link != nil:
 		d.link = deps.Link
+	case cfg.Transport == TransportSlack:
+		api := slack.NewClient(cfg.BotToken)
+		ws, err := slackws.Connect(ctx, slackws.Options{AppToken: cfg.AppToken, OnReconnect: catchUp})
+		if err != nil {
+			return err
+		}
+		defer ws.Close()
+		link := newSlackLink(api, ws)
+		// The bot's user id drives the self-post firebreak; resolve it
+		// from the server when the config leaves it empty.
+		if err := link.Identify(ctx); err != nil {
+			return err
+		}
+		if cfg.Self.UserID == "" {
+			cfg.Self.UserID = link.SelfUserID()
+		}
+		d.link = link
+		log.Printf("daemon: connected to slack as %s", link.SelfUserID())
 	default:
 		client := deps.Client
 		if client == nil {
@@ -206,10 +226,12 @@ type nilDepError struct{ name string }
 
 func (e *nilDepError) Error() string { return "daemon: nil " + e.name + " in Deps" }
 
-// newAmbientGate builds the gate for the ambient config, or nil when the
-// gate is disabled.
+// newAmbientGate builds the gate for the ambient config, or nil when
+// the gate is disabled. The gate is forced off for the Slack transport:
+// Slack has no quiet/mute mapping, so ambient wakes there could not be
+// silenced.
 func newAmbientGate(cfg Config) *wake.AmbientGate {
-	if cfg.Ambient.Endpoint == "" {
+	if cfg.Ambient.Endpoint == "" || cfg.Transport == TransportSlack {
 		return nil
 	}
 	return wake.NewAmbientGate(cfg.Ambient.MinSpacing, cfg.Ambient.MaxPerHour)

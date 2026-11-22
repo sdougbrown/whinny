@@ -17,6 +17,14 @@ const (
 	ModeShared = "shared"
 )
 
+// Transports.
+const (
+	// TransportApron runs the daemon over an apron websocket (default).
+	TransportApron = "apron"
+	// TransportSlack runs the daemon over Slack Socket Mode.
+	TransportSlack = "slack"
+)
+
 // Delivery backends.
 const (
 	// DeliverExec spawns Config.ExecCmd per wake with the envelope on
@@ -51,6 +59,13 @@ const (
 type Config struct {
 	// URL and Token are the apron endpoint and auth token.
 	URL, Token string
+	// Transport selects the room transport: "apron" (default) or
+	// "slack". Slack reads BotToken/AppToken; the CLI stays apron-only
+	// in this phase (posting to Slack rooms is a follow-up).
+	Transport string
+	// BotToken and AppToken are the Slack bot token (xoxb-) and
+	// app-level token (xapp-) for the slack transport.
+	BotToken, AppToken string
 	// DBPath is the state database path (informational: the store is
 	// injected through Deps).
 	DBPath string
@@ -72,7 +87,9 @@ type Config struct {
 	// Self is the bot's own identity.
 	Self wake.Self
 	// Ambient configures the ambient gate. An empty Endpoint disables
-	// the gate: no ambient evaluation happens.
+	// the gate: no ambient evaluation happens. The Slack transport
+	// forces the gate off regardless: Slack has no quiet/mute mapping,
+	// so ambient wakes there could not be silenced.
 	Ambient AmbientConfig
 }
 
@@ -117,6 +134,9 @@ func (c Config) WithDefaults() Config {
 	if c.Agent == "" {
 		c.Agent = DefaultAgent
 	}
+	if c.Transport == "" {
+		c.Transport = TransportApron
+	}
 	if c.Mode == "" {
 		c.Mode = DefaultMode
 	}
@@ -137,12 +157,19 @@ func (c Config) WithDefaults() Config {
 	return c
 }
 
-// Validate rejects an unknown mode or delivery backend, and an empty
-// self identity: with an empty user id the self-post firebreak
-// (m.From.UserID == Self.UserID) matches every post, and the daemon
-// would evaluate its own posts and self-wake.
+// Validate rejects an unknown mode, delivery backend, or transport.
+// An empty self identity is rejected for apron: with an empty user id
+// the self-post firebreak (m.From.UserID == Self.UserID) matches every
+// post, and the daemon would evaluate its own posts and self-wake. The
+// slack transport may leave it empty: Run resolves the bot's user id
+// from auth.test at startup.
 func (c Config) Validate() error {
-	if c.Self.UserID == "" {
+	switch c.Transport {
+	case "", TransportApron, TransportSlack:
+	default:
+		return fmt.Errorf("unknown transport %q (want %q or %q)", c.Transport, TransportApron, TransportSlack)
+	}
+	if c.Self.UserID == "" && c.Transport != TransportSlack {
 		return fmt.Errorf("self.user_id is empty: set it to the bot's apron user id (the self-post firebreak compares against it)")
 	}
 	switch c.Mode {
@@ -159,9 +186,15 @@ func (c Config) Validate() error {
 }
 
 // ValidateBackend rejects the backend/endpoint combinations no backend
-// can serve. Run calls it before it connects, so a misconfigured
-// backend is rejected before the first wake can panic the deliverer.
+// can serve, and a slack transport missing either token. Run calls it
+// before it connects, so a misconfigured backend is rejected before the
+// first wake can panic the deliverer.
 func (c Config) ValidateBackend() error {
+	if c.Transport == TransportSlack {
+		if c.BotToken == "" || c.AppToken == "" {
+			return fmt.Errorf("transport %q needs both SLACK_BOT_TOKEN and SLACK_APP_TOKEN", c.Transport)
+		}
+	}
 	switch c.Deliver {
 	case DeliverExec, DeliverResume:
 		if len(c.ExecCmd) == 0 {

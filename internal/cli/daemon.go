@@ -28,8 +28,9 @@ const DaemonConfigPath = ".config/whinny/daemon.json"
 // and the process exits 0. Output mode is raw: the feed backend writes
 // its JSON lines straight to stdout.
 //
-// Flags: --mode resident|shared, --deliver exec|resume|socket|feed,
-// --exec-cmd <cmd>, --socket-url <url>, --config <path>.
+// Flags: --transport apron|slack, --mode resident|shared, --deliver
+// exec|resume|socket|feed, --exec-cmd <cmd>, --socket-url <url>,
+// --config <path>.
 func DaemonHandler(d Deps) clicontract.RawFunc {
 	return func(ctx context.Context, inv clicontract.Invocation, stdout io.Writer) error {
 		cfg, err := ResolveDaemonConfig(inv, d.env())
@@ -74,6 +75,7 @@ func (d Deps) daemonStore() (*store.Store, bool, error) {
 // flags carry those.
 type daemonFileConfig struct {
 	Agent     string                    `json:"agent"`
+	Transport string                    `json:"transport"`
 	Mode      string                    `json:"mode"`
 	Deliver   string                    `json:"deliver"`
 	ExecCmd   []string                  `json:"exec_cmd"`
@@ -106,9 +108,11 @@ type daemonAmbientJSON struct {
 //
 //   - URL/token: --url/--token flags, then $WHINNY_URL/$APRON_URL and
 //     $WHINNY_TOKEN/$APRON_TOKEN, then the default endpoint.
-//   - mode, deliver, exec-cmd, socket-url: the --flag, then
-//     $WHINNY_DAEMON_MODE / $WHINNY_DAEMON_DELIVER, then the config
-//     file, then the built-in default.
+//   - Slack tokens: $SLACK_BOT_TOKEN and $SLACK_APP_TOKEN only (never
+//     flags or the config file).
+//   - transport, mode, deliver, exec-cmd, socket-url: the --flag, then
+//     $WHINNY_TRANSPORT / $WHINNY_DAEMON_MODE / $WHINNY_DAEMON_DELIVER,
+//     then the config file, then the built-in default.
 //   - agent, peers, self, ambient: the config file only (no flags).
 //
 // The config file path is --config, then $WHINNY_CONFIG, then
@@ -160,6 +164,13 @@ func ResolveDaemonConfig(inv clicontract.Invocation, env func(string) string) (d
 		cfg.DBPath = p
 	}
 
+	if v := inv.Flags["transport"]; v != "" {
+		cfg.Transport = v
+	} else if v := env("WHINNY_TRANSPORT"); v != "" {
+		cfg.Transport = v
+	}
+	cfg.BotToken = env("SLACK_BOT_TOKEN")
+	cfg.AppToken = env("SLACK_APP_TOKEN")
 	if v := inv.Flags["mode"]; v != "" {
 		cfg.Mode = v
 	} else if v := env("WHINNY_DAEMON_MODE"); v != "" {
@@ -203,6 +214,7 @@ func parseDaemonConfig(b []byte) (daemon.Config, error) {
 	}
 	cfg := daemon.Config{
 		Agent:     fc.Agent,
+		Transport: fc.Transport,
 		Mode:      fc.Mode,
 		Deliver:   fc.Deliver,
 		ExecCmd:   fc.ExecCmd,
