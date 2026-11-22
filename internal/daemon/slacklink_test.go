@@ -338,3 +338,25 @@ func TestSlackEventImageURL(t *testing.T) {
 		t.Errorf("image url = %q, want empty (off-slack.com host)", ev4.ImageURL)
 	}
 }
+
+// TestSlackHistoryImageURL: catch-up history carries the same
+// ImageURL the live path sets, so a wake replayed after downtime
+// keeps its image embed.
+func TestSlackHistoryImageURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true,"messages":[
+			{"type":"message","user":"U1","text":"look","ts":"1700000000.000500","files":[{"mimetype":"image/png","url_private":"https://files.slack.com/abc.png"}]}
+		]}`))
+	}))
+	t.Cleanup(srv.Close)
+	l := newSlackLink(slack.NewClient("xoxb-test", slack.WithBaseURL(srv.URL)), nil)
+
+	evs, err := l.History(context.Background(), "C1", 0, 20)
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	if len(evs) != 1 || evs[0].ImageURL != "https://files.slack.com/abc.png" {
+		t.Fatalf("events = %+v, want one with the file's url_private", evs)
+	}
+}

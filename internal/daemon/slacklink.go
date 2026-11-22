@@ -183,10 +183,11 @@ func (l *slackLink) History(ctx context.Context, roomID string, after int64, lim
 			continue
 		}
 		out = append(out, LinkEvent{
-			Kind:   KindMessage,
-			RoomID: m.RoomID,
-			Msg:    l.wakeMsg(m),
-			Cursor: cursor,
+			Kind:     KindMessage,
+			RoomID:   m.RoomID,
+			Msg:      l.wakeMsg(m),
+			ImageURL: m.ImageURL,
+			Cursor:   cursor,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Cursor < out[j].Cursor })

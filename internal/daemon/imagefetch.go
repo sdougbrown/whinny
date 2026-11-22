@@ -59,9 +59,10 @@ func (f *apronFetcher) Fetch(ctx context.Context, rawURL string) ([]byte, string
 }
 
 // slackFetcher fetches Slack image embeds: allowed origins are
-// slack.com hosts (slack.com, *.slack.com, e.g. files.slack.com),
-// every request carries the bot token's bearer auth, and a redirect
-// must stay on a slack.com host.
+// slack.com hosts (slack.com, *.slack.com, e.g. files.slack.com) over
+// https only, every request carries the bot token's bearer auth, and
+// a redirect must stay on a slack.com https URL — the same scheme-
+// and-host posture as the apron fetcher.
 type slackFetcher struct {
 	client *http.Client
 	token  string
@@ -75,8 +76,8 @@ func newSlackFetcher(token string) *slackFetcher {
 	f := &slackFetcher{token: token, hostAllowed: slack.HostAllowed}
 	f.client = &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if !f.hostAllowed(req.URL.Host) {
-				return errors.New("refusing redirect off slack.com")
+			if req.URL.Scheme != "https" || !f.hostAllowed(req.URL.Host) {
+				return errors.New("refusing redirect off slack.com https")
 			}
 			return nil
 		},

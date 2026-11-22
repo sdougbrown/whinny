@@ -419,3 +419,27 @@ func TestFeedDelivererWithSlackFetcher(t *testing.T) {
 		t.Errorf("media = %q, want image/png", rec.Image.Media)
 	}
 }
+
+// TestSlackFetcherRefusesDowngrade: a redirect to a slack.com host
+// over http is refused — the posture is scheme-and-host, matching the
+// apron fetcher.
+func TestSlackFetcherRefusesDowngrade(t *testing.T) {
+	var calls int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			http.Redirect(w, r, "http://files.slack.com/img.png", http.StatusFound)
+			return
+		}
+		w.Write([]byte("plaintext"))
+	}))
+	t.Cleanup(ts.Close)
+	f := newSlackFetcher("xoxb-test")
+	// The origin host is allowed; the redirect downgrades to http.
+	u, _ := url.Parse(ts.URL)
+	f.hostAllowed = func(host string) bool { return host == u.Host }
+	_, _, err := f.Fetch(context.Background(), ts.URL+"/start")
+	if err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("err = %v, want an https refusal", err)
+	}
+}
