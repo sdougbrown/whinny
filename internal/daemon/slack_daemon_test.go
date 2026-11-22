@@ -15,14 +15,18 @@ import (
 	"github.com/sdougbrown/whinny/internal/wake"
 )
 
-// fakeSlackAPI plays the Web API endpoints the Slack link calls.
-func newFakeSlackAPI(t *testing.T) *httptest.Server {
+// fakeSlackAPI plays the Web API endpoints the Slack link calls,
+// including apps.connections.open (the Socket Mode open call shares
+// the one base URL).
+func newFakeSlackAPI(t *testing.T, wsURL string) *httptest.Server {
 	t.Helper()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/auth.test":
 			w.Write([]byte(`{"ok":true,"user_id":"U9","bot_id":"B1"}`))
+		case "/apps.connections.open":
+			w.Write([]byte(`{"ok":true,"url":"` + wsURL + `"}`))
 		case "/conversations.list":
 			w.Write([]byte(`{"ok":true,"channels":[{"id":"C1","name":"general"}]}`))
 		case "/conversations.history":
@@ -35,10 +39,10 @@ func newFakeSlackAPI(t *testing.T) *httptest.Server {
 	return ts
 }
 
-// fakeSlackWS plays the Socket Mode open endpoint plus the WebSocket
-// it hands back; the accepted connection is delivered to the test.
+// fakeSlackWS plays the Socket Mode WebSocket endpoint; the accepted
+// connection is delivered to the test.
 type fakeSlackWS struct {
-	open *httptest.Server
+	url  string
 	conn chan *websocket.Conn
 }
 
@@ -53,12 +57,7 @@ func newFakeSlackWS(t *testing.T) *fakeSlackWS {
 		f.conn <- c
 	}))
 	t.Cleanup(wsTS.Close)
-	wsURL := "ws" + strings.TrimPrefix(wsTS.URL, "http")
-	f.open = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"ok":true,"url":"` + wsURL + `"}`))
-	}))
-	t.Cleanup(f.open.Close)
+	f.url = "ws" + strings.TrimPrefix(wsTS.URL, "http")
 	return f
 }
 
@@ -99,8 +98,8 @@ func waitWatchNote(t *testing.T, st *store.Store, note string) store.Watch {
 // an empty config self: the resolved id (from auth.test) must reach the
 // daemon's copy so the firebreak and the evaluation both see it.
 func TestSlackSelfIDReachesDaemon(t *testing.T) {
-	api := newFakeSlackAPI(t)
 	ws := newFakeSlackWS(t)
+	api := newFakeSlackAPI(t, ws.url)
 
 	cfg := Config{
 		Agent:     "squire",
@@ -123,14 +122,13 @@ func TestSlackSelfIDReachesDaemon(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- Run(ctx, cfg, Deps{
-			Store:          st,
-			Deliver:        dlv,
-			Clock:          clock,
-			Now:            clock.Now,
-			Ticker:         func(time.Duration) Ticker { return ticker },
-			Wait:           func(time.Duration) {},
-			SlackBaseURL:   api.URL,
-			SlackWSBaseURL: ws.open.URL,
+			Store:        st,
+			Deliver:      dlv,
+			Clock:        clock,
+			Now:          clock.Now,
+			Ticker:       func(time.Duration) Ticker { return ticker },
+			Wait:         func(time.Duration) {},
+			SlackBaseURL: api.URL,
 		})
 	}()
 

@@ -96,6 +96,23 @@ func (c *Client) AuthTest(ctx context.Context) (AuthResult, error) {
 	return AuthResult{UserID: out.UserID, BotID: out.BotID}, nil
 }
 
+// ConnectionsOpen opens a Socket Mode connection via
+// apps.connections.open (app-level token) and returns the WSS URL.
+// It rides the same call path as every other Web API method, so
+// bearer auth, ok:false, non-200, and 429 semantics are shared.
+func (c *Client) ConnectionsOpen(ctx context.Context) (string, error) {
+	var out struct {
+		URL string `json:"url"`
+	}
+	if err := c.call(ctx, "apps.connections.open", map[string]string{}, &out); err != nil {
+		return "", err
+	}
+	if out.URL == "" {
+		return "", fmt.Errorf("apps.connections.open: empty url")
+	}
+	return out.URL, nil
+}
+
 // ListParams is the params for conversations.list.
 type ListParams struct {
 	Types  []string

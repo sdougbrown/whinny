@@ -6,17 +6,13 @@ package slackws
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/sdougbrown/whinny/internal/slack"
 )
-
-const defaultAPIBase = "https://slack.com/api"
 
 // Event is one inbound Socket Mode event.
 type Event struct {
@@ -50,9 +46,8 @@ type Options struct {
 // controls the client's lifetime: when it is done, the client stops
 // reconnecting and closes the connection.
 type Client struct {
-	opts    Options
-	apiBase string
-	http    *http.Client
+	opts Options
+	api  *slack.Client
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -78,19 +73,19 @@ const dedupeSize = 256
 // app-level token, then a dial of the returned WSS URL, then the read
 // loop. Reconnects with backoff (1s to 30s) on disconnect or read error.
 func Connect(ctx context.Context, opts Options) (*Client, error) {
+	var apiOpts []slack.ClientOption
+	if opts.BaseURL != "" {
+		apiOpts = append(apiOpts, slack.WithBaseURL(opts.BaseURL))
+	}
+	if opts.HTTPClient != nil {
+		apiOpts = append(apiOpts, slack.WithHTTPClient(opts.HTTPClient))
+	}
 	c := &Client{
 		opts:    opts,
-		apiBase: defaultAPIBase,
-		http:    http.DefaultClient,
+		api:     slack.NewClient(opts.AppToken, apiOpts...),
 		seen:    make(map[string]struct{}, dedupeSize),
 		ring:    make([]string, dedupeSize),
 		records: make(chan Event, 256),
-	}
-	if opts.BaseURL != "" {
-		c.apiBase = strings.TrimSuffix(opts.BaseURL, "/")
-	}
-	if opts.HTTPClient != nil {
-		c.http = opts.HTTPClient
 	}
 	c.mu.Lock()
 	c.onReconnect = opts.OnReconnect
@@ -98,7 +93,7 @@ func Connect(ctx context.Context, opts Options) (*Client, error) {
 	c.ctx, c.cancel = context.WithCancel(ctx)
 	c.done = make(chan struct{})
 
-	url, err := c.openURL(ctx)
+	url, err := c.api.ConnectionsOpen(ctx)
 	if err != nil {
 		c.cancel()
 		return nil, err
@@ -134,38 +129,6 @@ func (c *Client) Close() {
 	<-c.done
 }
 
-// openURL calls apps.connections.open and returns the WSS URL.
-func (c *Client) openURL(ctx context.Context) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiBase+"/apps.connections.open", nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.opts.AppToken)
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", &slack.APIError{Method: "apps.connections.open", SlackError: fmt.Sprintf("http_%d", resp.StatusCode)}
-	}
-	var out struct {
-		OK    bool   `json:"ok"`
-		URL   string `json:"url"`
-		Error string `json:"error"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", fmt.Errorf("apps.connections.open: decode response: %w", err)
-	}
-	if !out.OK {
-		return "", &slack.APIError{Method: "apps.connections.open", SlackError: out.Error}
-	}
-	if out.URL == "" {
-		return "", fmt.Errorf("apps.connections.open: empty url")
-	}
-	return out.URL, nil
-}
-
 // dial establishes the WebSocket connection.
 func (c *Client) dial(ctx context.Context, url string) error {
 	hctx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -198,7 +161,7 @@ func (c *Client) run() {
 			return
 		case <-time.After(backoff):
 		}
-		url, err := c.openURL(c.ctx)
+		url, err := c.api.ConnectionsOpen(c.ctx)
 		if err != nil {
 			if c.ctx.Err() != nil {
 				return

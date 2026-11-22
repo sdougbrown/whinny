@@ -53,11 +53,10 @@ type Deps struct {
 	// to time.Sleep.
 	Wait func(time.Duration)
 	// SlackBaseURL, if set, overrides the Slack Web API base URL (tests
-	// point it at a fake server). Empty uses the real API.
+	// point it at a fake server); it covers both the Web API client and
+	// the Socket Mode apps.connections.open call. Empty uses the real
+	// API.
 	SlackBaseURL string
-	// SlackWSBaseURL, if set, overrides the Slack Socket Mode API base
-	// URL (tests point it at a fake server). Empty uses the real API.
-	SlackWSBaseURL string
 }
 
 // daemon is the run-loop state: one connected link, one store, one
@@ -150,8 +149,8 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 		}
 		api := slack.NewClient(cfg.BotToken, apiOpts...)
 		wsOpts := slackws.Options{AppToken: cfg.AppToken}
-		if deps.SlackWSBaseURL != "" {
-			wsOpts.BaseURL = deps.SlackWSBaseURL
+		if deps.SlackBaseURL != "" {
+			wsOpts.BaseURL = deps.SlackBaseURL
 		}
 		ws, err := slackws.Connect(ctx, wsOpts)
 		if err != nil {

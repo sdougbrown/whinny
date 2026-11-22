@@ -177,6 +177,38 @@ func TestAPIErrorNon200(t *testing.T) {
 	}
 }
 
+func TestConnectionsOpen(t *testing.T) {
+	f := newAPIFake(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/apps.connections.open" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "url": "wss://example/sock"})
+	})
+	c := NewClient("xapp-test", WithBaseURL(f.ts.URL))
+	url, err := c.ConnectionsOpen(context.Background())
+	if err != nil {
+		t.Fatalf("ConnectionsOpen: %v", err)
+	}
+	if url != "wss://example/sock" {
+		t.Errorf("url = %q, want wss://example/sock", url)
+	}
+	if got, want := f.auth("apps.connections.open"), "Bearer xapp-test"; got != want {
+		t.Errorf("Authorization = %q, want %q", got, want)
+	}
+	// An ok:false envelope is an APIError like every other method.
+	f2 := newAPIFake(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": "invalid_auth"})
+	})
+	_, err = NewClient("xapp-bad", WithBaseURL(f2.ts.URL)).ConnectionsOpen(context.Background())
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		t.Fatalf("err = %T (%v), want *APIError", err, err)
+	}
+	if apiErr.Method != "apps.connections.open" || apiErr.SlackError != "invalid_auth" {
+		t.Fatalf("APIError = %+v", apiErr)
+	}
+}
+
 func TestConversationsList(t *testing.T) {
 	var f *apiFake
 	f = newAPIFake(t, func(w http.ResponseWriter, r *http.Request) {
