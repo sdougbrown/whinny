@@ -10,6 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+
+	"github.com/coder/websocket"
 	"testing"
 	"time"
 
@@ -831,6 +834,43 @@ func TestRunValidatesBackendBeforeConnect(t *testing.T) {
 	}
 }
 
+// TestRunRejectsDepsWithBothLinkAndClient: Deps carrying both an
+// injected Link and an apron Client is rejected before any dial: the
+// two transport-injection paths are mutually exclusive, and the error
+// names both fields.
+func TestRunRejectsDepsWithBothLinkAndClient(t *testing.T) {
+	srv := apronfake.New(t)
+	srv.AutoRespond = true
+	errC := make(chan error, 1)
+	go func() {
+		fc, err := srv.WaitConn(1)
+		if err != nil {
+			srv.ReportError(err)
+			errC <- err
+			return
+		}
+		errC <- serverHandshake(t, fc)
+	}()
+	client, err := apronws.Connect(context.Background(), apronws.Options{URL: srv.WSURL(), Token: "test-token"})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	if err := <-errC; err != nil {
+		t.Fatalf("server handshake: %v", err)
+	}
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	deps := Deps{Client: client, Link: newFakeLink(), Store: st, Deliver: newFakeDeliverer()}
+	if err := Run(context.Background(), baseCfg(), deps); err == nil || !strings.Contains(err.Error(), "Link") || !strings.Contains(err.Error(), "Client") {
+		t.Errorf("Run = %v, want the error naming both Link and Client", err)
+	}
+}
+
 // startHarnessWithSetup is like startHarness but calls setup (to
 // configure the fake server) after the client connects and before Run
 // starts, so the startup catch-up sees the configured responses.
@@ -1354,4 +1394,107 @@ func TestSelfPostReplyNoHistoryLookup(t *testing.T) {
 		t.Errorf("history lookups = %d, want 0 (self-post)", n)
 	}
 	h.stop(t)
+}
+
+func TestSlackSelfIDMismatchWins(t *testing.T) {
+	// Fake Web API: auth.test resolves the real identity,
+	// apps.connections.open hands out the fake socket URL.
+	wsURL := &atomic.Value{}
+	apiMux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/auth.test":
+			w.Write([]byte(`{"ok":true,"user_id":"real-self","bot_id":"B1"}`))
+		case "/api/apps.connections.open":
+			w.Write([]byte(`{"ok":true,"url":"` + wsURL.Load().(string) + `"}`))
+		default:
+			w.Write([]byte(`{"ok":false}`))
+		}
+	})
+	api := httptest.NewServer(apiMux)
+	defer api.Close()
+
+	events := make(chan string, 4)
+	ws := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		for {
+			// A self post, pushed by the "server" side.
+			select {
+			case payload := <-events:
+				frame := `{"type":"events_api","envelope_id":"e1","payload":{"type":"event_callback","event":` + payload + `}}`
+				if err := conn.Write(context.Background(), websocket.MessageText, []byte(frame)); err != nil {
+					return
+				}
+			case <-r.Context().Done():
+				return
+			}
+			// Read the ack so the client does not resend.
+			if _, _, err := conn.Read(context.Background()); err != nil {
+				return
+			}
+		}
+	}))
+	defer ws.Close()
+	wsURL.Store("ws://" + strings.TrimPrefix(ws.URL, "http://"))
+
+	cfg := baseCfg()
+	cfg.Transport = TransportSlack
+	cfg.BotToken, cfg.AppToken = "xoxb-test", "xapp-test"
+	// A stale configured self id must not bypass the firebreak: the
+	// resolved Slack identity wins.
+	cfg.Self.UserID = "stale-self"
+
+	h := &harness{dlv: newFakeDeliverer(), clock: newFakeClock(), ticker: newTestTicker(), done: make(chan error, 1)}
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	h.st = st
+	t.Cleanup(func() { h.st.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	h.cancel = cancel
+	t.Cleanup(h.cancel)
+	go func() {
+		h.done <- Run(ctx, cfg, Deps{
+			Store:        h.st,
+			Deliver:      h.dlv,
+			Clock:        h.clock,
+			Now:          h.clock.Now,
+			Ticker:       func(time.Duration) Ticker { return h.ticker },
+			Wait:         func(time.Duration) {},
+			SlackBaseURL: api.URL + "/api",
+		})
+	}()
+
+	// A self post with the resolved id: the firebreak must drop it even
+	// though the configured self id says otherwise.
+	events <- `{"type":"message","channel":"C1","user":"real-self","text":"my own post","ts":"1700000000.000100"}`
+	waitCursorAt(t, h.st, "C1", 1700000000000100)
+	if got := h.dlv.count(); got != 0 {
+		t.Errorf("deliveries = %d, want 0 (self-post firebreak uses the resolved id)", got)
+	}
+	h.stop(t)
+	select {
+	case err := <-h.done:
+		t.Logf("run error: %v", err)
+	default:
+	}
+}
+
+func TestClientWithSlackTransportRejected(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	cfg := baseCfg()
+	cfg.Transport = TransportSlack
+	cfg.BotToken, cfg.AppToken = "xoxb-test", "xapp-test"
+	deps := Deps{Client: &apronws.Client{}, Link: nil, Store: st, Deliver: newFakeDeliverer()}
+	if err := Run(context.Background(), cfg, deps); err == nil || !strings.Contains(err.Error(), "slack transport") {
+		t.Errorf("Run = %v, want the client-with-slack rejection", err)
+	}
 }

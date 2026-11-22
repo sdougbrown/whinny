@@ -216,7 +216,7 @@ func App(d Deps) *clicontract.App {
 			{
 				Name:  "daemon",
 				Short: "run the wake daemon (long-running)",
-				Long: "Hold the apron connection, evaluate the wake policy over " +
+				Long: "Hold the room transport connection, evaluate the wake policy over " +
 					"inbound messages, and deliver wake envelopes through the " +
 					"configured backend. Modes: resident (full policy, durable " +
 					"wake queue) or shared (watch hits only, fire-and-forget). " +
@@ -226,6 +226,7 @@ func App(d Deps) *clicontract.App {
 					"SIGINT/SIGTERM shut the daemon down cleanly; the process " +
 					"exits 0.",
 				Flags: []clicontract.Flag{
+					{Name: "transport", Kind: clicontract.String, Usage: "apron or slack (default apron; slack needs $SLACK_BOT_TOKEN and $SLACK_APP_TOKEN; $WHINNY_TRANSPORT)"},
 					{Name: "mode", Kind: clicontract.String, Usage: "resident or shared (default resident; $WHINNY_DAEMON_MODE)"},
 					{Name: "deliver", Kind: clicontract.String, Usage: "exec, resume, socket, or feed (default exec; $WHINNY_DAEMON_DELIVER)"},
 					{Name: "exec-cmd", Kind: clicontract.String, Usage: "command exec/resume spawns per wake; envelope on stdin (shell-split)"},

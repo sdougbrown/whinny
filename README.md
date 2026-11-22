@@ -89,7 +89,9 @@ Common flags on every command: `--url <endpoint>` (`$WHINNY_URL`, then
 - `whinny breaker-clear` — clear the send-path breaker latch and reset the
   consecutive post-failure counter, so the next post is allowed.
 - `whinny daemon` — run the wake daemon (long-running). Flags:
-  `--mode resident|shared` (`$WHINNY_DAEMON_MODE`), `--deliver
+  `--transport apron|slack` (`$WHINNY_TRANSPORT`; slack needs
+  `$SLACK_BOT_TOKEN` and `$SLACK_APP_TOKEN`), `--mode resident|shared`
+  (`$WHINNY_DAEMON_MODE`), `--deliver
   exec|resume|socket|feed` (`$WHINNY_DAEMON_DELIVER`), `--exec-cmd <cmd>`
   (shell-split), `--socket-url <url>`, `--config <path>`
   (`$WHINNY_CONFIG`). SIGINT/SIGTERM shut it down cleanly with exit 0.
@@ -110,6 +112,17 @@ day; disable with meta `auto_subscribe=off`.
 registered with `--owner <identity> --on-fire <command>` fires straight to
 that owner's delivery command (the meta key `delivery:<owner>`), which is how
 one daemon serves transient identities.
+
+**Transport** — `--transport apron` (default) runs over an apron websocket;
+`--transport slack` runs over Slack Socket Mode. The Slack daemon resolves
+its own user id via `auth.test` (so the config file may omit `self.user_id`),
+and the ambient gate is forced off — Slack has no quiet/mute mapping. Slack
+tokens come only from `$SLACK_BOT_TOKEN` (bot, `xoxb-`) and
+`$SLACK_APP_TOKEN` (app-level, `xapp-`). The config file takes
+`"transport": "slack"` instead of the flag. Live `message.mpim` events
+wake, but MPIM catch-up after downtime does not: `conversations.list`
+under a bot token returns no MPIMs, so MPIMs are missing from the room
+list and history catch-up.
 
 **Delivery backends** (`--deliver`):
 
@@ -179,11 +192,26 @@ One SQLite database (`$WHINNY_DB`, default `~/.local/share/whinny/state.db`):
 **Environment variables**: `WHINNY_URL` / `APRON_URL` (endpoint),
 `WHINNY_TOKEN` / `APRON_TOKEN` (session token), `WHINNY_DB` (state path),
 `WHINNY_CONFIG` (daemon config file), `WHINNY_DAEMON_MODE`,
-`WHINNY_DAEMON_DELIVER`, `WHINNY_RATE_PER_MINUTE` (send-path rate limit,
+`WHINNY_DAEMON_DELIVER`, `WHINNY_TRANSPORT` (daemon transport, default
+apron), `SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN` (slack daemon tokens),
+`WHINNY_RATE_PER_MINUTE` (send-path rate limit,
 default 20).
 
 ## Known gaps (v1)
 
+- The CLI's send path is apron-only: with `--transport slack` the daemon
+  receives and delivers wakes, but `whinny post` and friends still talk to
+  apron rooms (posting to Slack rooms is a follow-up).
+- Slack "reply to my message" wakes only when the bot's post is the
+  thread root: `ReplyTo` carries the `thread_ts` (thread root), so replies
+  to the bot's non-root thread posts don't wake.
+- Slack delete tombstones carry no author, so the reply-author cache
+  cannot resolve a deleted message's author on Slack (apron's tombstones
+  do feed it).
+- Slack watch hits deliver text-only envelopes: Slack image embeds need
+  bearer-authenticated fetches the transport-agnostic deliverer doesn't
+  carry, so `LinkEvent.ImageURL` is left empty on Slack (apron fills it;
+  auth-aware fetches are follow-up work).
 - Feed image fetch is same-origin restricted and capped.
 - Delivery runs synchronously in the record loop: a slow deliverer can
   backpressure the connection.
@@ -260,6 +288,28 @@ the model sees.
 3. Watches are conversation state: they do not survive a session rotation,
    so an agent relying on one re-arms it (`whinny watch add`) after the wake
    that mattered.
+
+### Slack (resident, same recipes, different transport)
+
+The poo/pi recipes above work unchanged with the daemon running over Slack:
+set `--transport slack` and export the tokens instead of apron's. The Slack
+app needs Socket Mode enabled with the `message.channels`, `message.groups`,
+`message.im`, `message.mpim`, and `app_mention` events subscribed bot-side.
+The daemon resolves its own user id at startup, so the config file can omit
+`self.user_id`:
+
+```sh
+export SLACK_BOT_TOKEN=xoxb-...
+export SLACK_APP_TOKEN=xapp-...
+whinny daemon --transport slack --deliver feed --config /etc/whinny/daemon.json
+```
+
+Room ids in watches and cursors are Slack channel ids; the ambient gate is
+forced off (no quiet mapping yet). "Reply to my message" wakes only when
+the bot's post is the thread root (a reply's `thread_ts` is the thread
+root, so replies to the bot's non-root thread posts don't wake). The CLI
+send path stays apron-only in this phase — the Slack daemon receives and
+delivers, but `whinny post` still targets apron rooms.
 
 ### One-shot and transient agents (shared mode)
 

@@ -28,8 +28,9 @@ const DaemonConfigPath = ".config/whinny/daemon.json"
 // and the process exits 0. Output mode is raw: the feed backend writes
 // its JSON lines straight to stdout.
 //
-// Flags: --mode resident|shared, --deliver exec|resume|socket|feed,
-// --exec-cmd <cmd>, --socket-url <url>, --config <path>.
+// Flags: --transport apron|slack, --mode resident|shared, --deliver
+// exec|resume|socket|feed, --exec-cmd <cmd>, --socket-url <url>,
+// --config <path>.
 func DaemonHandler(d Deps) clicontract.RawFunc {
 	return func(ctx context.Context, inv clicontract.Invocation, stdout io.Writer) error {
 		cfg, err := ResolveDaemonConfig(inv, d.env())
@@ -74,6 +75,7 @@ func (d Deps) daemonStore() (*store.Store, bool, error) {
 // flags carry those.
 type daemonFileConfig struct {
 	Agent     string                    `json:"agent"`
+	Transport string                    `json:"transport"`
 	Mode      string                    `json:"mode"`
 	Deliver   string                    `json:"deliver"`
 	ExecCmd   []string                  `json:"exec_cmd"`
@@ -104,8 +106,15 @@ type daemonAmbientJSON struct {
 // ResolveDaemonConfig resolves the daemon configuration. Precedence, per
 // field:
 //
-//   - URL/token: --url/--token flags, then $WHINNY_URL/$APRON_URL and
-//     $WHINNY_TOKEN/$APRON_TOKEN, then the default endpoint.
+//   - transport: the --transport flag, then $WHINNY_TRANSPORT, then the
+//     config file, then the built-in default (apron). Resolved before
+//     the apron endpoint, so a slack-only setup never demands apron
+//     credentials.
+//   - URL/token (apron transport only): --url/--token flags, then
+//     $WHINNY_URL/$APRON_URL and $WHINNY_TOKEN/$APRON_TOKEN, then the
+//     default endpoint.
+//   - Slack tokens: $SLACK_BOT_TOKEN and $SLACK_APP_TOKEN only (never
+//     flags or the config file).
 //   - mode, deliver, exec-cmd, socket-url: the --flag, then
 //     $WHINNY_DAEMON_MODE / $WHINNY_DAEMON_DELIVER, then the config
 //     file, then the built-in default.
@@ -150,16 +159,30 @@ func ResolveDaemonConfig(inv clicontract.Invocation, env func(string) string) (d
 		return daemon.Config{}, UsageErrorf("daemon: read config %s: %v", path, err)
 	}
 
-	endpoint, err := ResolveConfig(inv.Flags["url"], inv.Flags["token"], env)
-	if err != nil {
-		return daemon.Config{}, err
+	// The transport resolves before the apron endpoint: the apron
+	// URL/token requirement applies only to the apron transport, so a
+	// slack-only setup (the README's recipe) must not fail here.
+	if v := inv.Flags["transport"]; v != "" {
+		cfg.Transport = v
+	} else if v := env("WHINNY_TRANSPORT"); v != "" {
+		cfg.Transport = v
 	}
-	cfg.URL = endpoint.URL
-	cfg.Token = endpoint.Token
+	if cfg.Transport == "" {
+		cfg.Transport = daemon.TransportApron
+	}
+	if cfg.Transport != daemon.TransportSlack {
+		endpoint, err := ResolveConfig(inv.Flags["url"], inv.Flags["token"], env)
+		if err != nil {
+			return daemon.Config{}, err
+		}
+		cfg.URL = endpoint.URL
+		cfg.Token = endpoint.Token
+	}
+	cfg.BotToken = env("SLACK_BOT_TOKEN")
+	cfg.AppToken = env("SLACK_APP_TOKEN")
 	if p, err := StorePath(env); err == nil {
 		cfg.DBPath = p
 	}
-
 	if v := inv.Flags["mode"]; v != "" {
 		cfg.Mode = v
 	} else if v := env("WHINNY_DAEMON_MODE"); v != "" {
@@ -203,6 +226,7 @@ func parseDaemonConfig(b []byte) (daemon.Config, error) {
 	}
 	cfg := daemon.Config{
 		Agent:     fc.Agent,
+		Transport: fc.Transport,
 		Mode:      fc.Mode,
 		Deliver:   fc.Deliver,
 		ExecCmd:   fc.ExecCmd,

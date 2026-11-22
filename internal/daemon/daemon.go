@@ -3,13 +3,15 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/sdougbrown/whinny/internal/apronws"
+	"github.com/sdougbrown/whinny/internal/slack"
+	"github.com/sdougbrown/whinny/internal/slack/slackws"
 	"github.com/sdougbrown/whinny/internal/store"
 	"github.com/sdougbrown/whinny/internal/wake"
 	"github.com/sdougbrown/whinny/internal/watch"
@@ -30,11 +32,14 @@ func (t realTicker) Stop()               { t.t.Stop() }
 // newRealTicker builds the production ticker.
 func newRealTicker(d time.Duration) Ticker { return realTicker{t: time.NewTicker(d)} }
 
-// Deps carries the injected dependencies. Client may be nil, in which
-// case Run connects through apronws itself and owns the client; tests
-// inject a client connected to a fake server instead.
+// Deps carries the injected dependencies. Link may be set to run the
+// daemon over any transport (tests inject a fake); otherwise Client may
+// be set (wrapped in the apron adapter), and when both are nil Run
+// connects through apronws itself and owns the client. Setting both is
+// an error: Run rejects it before any dial.
 type Deps struct {
 	Client  *apronws.Client
+	Link    Link
 	Store   *store.Store
 	Deliver Deliverer
 	// Clock is the policy's time source (ambient gate valves). Nil falls
@@ -49,22 +54,26 @@ type Deps struct {
 	// Wait is the pause between history-lookup retries. Nil falls back
 	// to time.Sleep.
 	Wait func(time.Duration)
+	// SlackBaseURL, if set, overrides the Slack Web API base URL (tests
+	// point it at a fake server); it covers both the Web API client and
+	// the Socket Mode apps.connections.open call. Empty uses the real
+	// API.
+	SlackBaseURL string
 }
 
-// daemon is the run-loop state: one connected client, one store, one
-// deliverer. This struct is the RoomLink seam — when the standalone
-// link is extracted from the daemon, it grows from here.
+// daemon is the run-loop state: one connected link, one store, one
+// deliverer.
 type daemon struct {
-	cfg    Config
-	store  *store.Store
-	client *apronws.Client
-	dlv    Deliverer
-	now    func() time.Time
-	clock  wake.Clock
-	gate   *wake.AmbientGate
-	class  wake.Classifier
-	hist   *historyCache
-	wait   func(time.Duration)
+	cfg   Config
+	store *store.Store
+	link  Link
+	dlv   Deliverer
+	now   func() time.Time
+	clock wake.Clock
+	gate  *wake.AmbientGate
+	class wake.Classifier
+	hist  *historyCache
+	wait  func(time.Duration)
 	// procMu serializes record handling between the live loop and the
 	// reconnect catch-up goroutine: the cursor dedupe is check-then-act
 	// (GetCursor then SetCursor, with no store-side lock spanning both),
@@ -72,15 +81,16 @@ type daemon struct {
 	// across the dedupe check, evaluation, and enqueue; delivery (the
 	// queue flush and shared callbacks) runs after the lock is released
 	// so a slow deliverer cannot stall live processing or catch-up.
-	// Deliver must not re-enter handleRecord.
+	// Deliver must not re-enter handleEvent.
 	procMu sync.Mutex
 }
 
 // Run drives the daemon until ctx is done: it validates the config
 // (including the delivery backend, before any connection is attempted),
-// connects (when no client is injected), drains stale queued wakes for
-// its agent, then loops over inbound records and the expiry sweep. It
-// returns nil on clean shutdown (ctx cancel or client close).
+// builds the transport link (injected Link, injected apron client, or a
+// fresh apron connection), drains stale queued wakes for its agent, then
+// loops over inbound events and the expiry sweep. It returns nil on
+// clean shutdown (ctx cancel or link close).
 func Run(ctx context.Context, cfg Config, deps Deps) error {
 	cfg = cfg.WithDefaults()
 	if err := cfg.Validate(); err != nil {
@@ -96,6 +106,15 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 	}
 	if deps.Deliver == nil {
 		return errNilDep("deliverer")
+	}
+	// The two transport-injection paths are mutually exclusive: an
+	// injected Link and an apron Client both driving the run is a
+	// wiring mistake, rejected before any dial.
+	if deps.Link != nil && deps.Client != nil {
+		return fmt.Errorf("daemon: Deps sets both Link and Client; set exactly one")
+	}
+	if deps.Client != nil && cfg.Transport == TransportSlack {
+		return fmt.Errorf("daemon: Deps sets Client with the slack transport; an injected apron client is unusable — set Link or drop Client")
 	}
 	now := deps.Now
 	if now == nil {
@@ -128,26 +147,82 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 	// Reconnect catch-up: when the connection drops and reconnects, the
 	// messages missed in the gap are replayed from history (the cursor
 	// bounds the window). The hook runs in its own goroutine, off the
-	// client's read loop.
+	// transport's read loop.
 	catchUp := func() { d.catchUp(ctx) }
 
-	client := deps.Client
-	if client == nil {
-		var err error
-		client, err = apronws.Connect(ctx, apronws.Options{URL: cfg.URL, Token: cfg.Token, OnReconnect: catchUp})
+	switch {
+	case deps.Link != nil:
+		d.link = deps.Link
+	case cfg.Transport == TransportSlack:
+		apiOpts := []slack.ClientOption{}
+		if deps.SlackBaseURL != "" {
+			apiOpts = append(apiOpts, slack.WithBaseURL(deps.SlackBaseURL))
+		}
+		api := slack.NewClient(cfg.BotToken, apiOpts...)
+		wsOpts := slackws.Options{AppToken: cfg.AppToken}
+		if deps.SlackBaseURL != "" {
+			wsOpts.BaseURL = deps.SlackBaseURL
+		}
+		ws, err := slackws.Connect(ctx, wsOpts)
 		if err != nil {
 			return err
 		}
-		defer client.Close()
-		// The connection is authenticated at this point, so pushes for the
-		// bot's rooms arrive from here on. Operators and scripts wait on
-		// this line to know the daemon is live.
-		log.Printf("daemon: connected to %s", cfg.URL)
+		defer ws.Close()
+		link := newSlackLink(api, ws)
+		// The bot's user id drives the self-post firebreak; resolve it
+		// from the server when the config leaves it empty.
+		if err := link.Identify(ctx); err != nil {
+			return err
+		}
+		if cfg.Self.UserID == "" {
+			cfg.Self.UserID = link.SelfUserID()
+		} else if cfg.Self.UserID != link.SelfUserID() {
+			// A stale configured id silently bypasses the self-post
+			// firebreak (senders are attributed by the resolved ids),
+			// so the resolved id wins and the mismatch is loud.
+			log.Printf("daemon: configured self.user_id %q does not match the Slack identity %q; using %q",
+				cfg.Self.UserID, link.SelfUserID(), link.SelfUserID())
+			cfg.Self.UserID = link.SelfUserID()
+		}
+		// The daemon struct holds its own copy of cfg (built before the
+		// transport switch); carry the resolved id through so the policy
+		// reads it.
+		d.cfg.Self.UserID = cfg.Self.UserID
+		d.link = link
+		log.Printf("daemon: connected to slack as %s", link.SelfUserID())
+	default:
+		client := deps.Client
+		if client == nil {
+			var err error
+			client, err = apronws.Connect(ctx, apronws.Options{URL: cfg.URL, Token: cfg.Token})
+			if err != nil {
+				return err
+			}
+			defer client.Close()
+			// The connection is authenticated at this point, so pushes for
+			// the bot's rooms arrive from here on. Operators and scripts
+			// wait on this line to know the daemon is live.
+			log.Printf("daemon: connected to %s", cfg.URL)
+		}
+		d.link = newApronLink(client)
 	}
-	d.client = client
-	d.hist = newHistoryCache(client)
-	if deps.Client != nil {
-		client.SetOnReconnect(catchUp)
+	d.hist = newHistoryCache(d.link)
+	// A delete tombstone carries no body to evaluate, but its author is
+	// recorded so a later reply to the deleted message resolves; the
+	// adapter forwards tombstones to this callback. Slack's
+	// message_deleted events carry no author, so the Slack link never
+	// implements this hook: deleted-message authors are unresolvable
+	// on Slack (a Slack-specific limitation; apron's tombstones do
+	// feed the cache).
+	if f, ok := d.link.(interface {
+		SetTombstoneFeed(func(string, string, string))
+	}); ok {
+		f.SetTombstoneFeed(d.hist.feed)
+	}
+	// The reconnect hook is optional: an apron link forwards it to the
+	// client; a link without the hook simply never replays on reconnect.
+	if r, ok := d.link.(interface{ SetOnReconnect(func()) }); ok {
+		r.SetOnReconnect(catchUp)
 	}
 
 	// Drain stale queue entries for this agent before the loop: a wake
@@ -170,17 +245,22 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 	tick := newTicker(ExpirySweepInterval)
 	defer tick.Stop()
 
+	events, err := d.link.Events(ctx)
+	if err != nil {
+		return err
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-tick.C():
 			d.expireDue(ctx)
-		case rec, ok := <-client.Records():
+		case ev, ok := <-events:
 			if !ok {
 				return nil
 			}
-			d.handleRecord(ctx, rec, subscribe)
+			d.handleEvent(ctx, ev, subscribe)
 		}
 	}
 }
@@ -193,10 +273,12 @@ type nilDepError struct{ name string }
 
 func (e *nilDepError) Error() string { return "daemon: nil " + e.name + " in Deps" }
 
-// newAmbientGate builds the gate for the ambient config, or nil when the
-// gate is disabled.
+// newAmbientGate builds the gate for the ambient config, or nil when
+// the gate is disabled. The gate is forced off for the Slack transport:
+// Slack has no quiet/mute mapping, so ambient wakes there could not be
+// silenced.
 func newAmbientGate(cfg Config) *wake.AmbientGate {
-	if cfg.Ambient.Endpoint == "" {
+	if cfg.Ambient.Endpoint == "" || cfg.Transport == TransportSlack {
 		return nil
 	}
 	return wake.NewAmbientGate(cfg.Ambient.MinSpacing, cfg.Ambient.MaxPerHour)
@@ -226,54 +308,44 @@ func (d *daemon) drain(ctx context.Context) error {
 const catchUpLimit = 200
 
 func (d *daemon) catchUp(ctx context.Context) {
-	rooms, err := d.client.RoomList(ctx, apronws.RoomListParams{})
+	rooms, err := d.link.Rooms(ctx)
 	if err != nil {
 		log.Printf("daemon: catch-up room list: %v", err)
 		return
 	}
 	subscribe := d.autoSubscribe(ctx)
-	for _, room := range rooms.Joined {
+	for _, room := range rooms {
 		cursor, err := d.store.GetCursor(ctx, room.ID)
 		if err != nil {
 			log.Printf("daemon: catch-up cursor %s: %v", room.ID, err)
 			continue
 		}
-		res, err := d.client.History(ctx, apronws.HistoryParams{RoomID: room.ID, Limit: catchUpLimit})
+		events, err := d.link.History(ctx, room.ID, cursor, catchUpLimit)
 		if err != nil {
 			log.Printf("daemon: catch-up history %s: %v", room.ID, err)
 			continue
 		}
-		var msgs []*apronws.Message
-		for i := range res.Messages {
-			if int64(res.Messages[i].LogID) > cursor {
-				msgs = append(msgs, &res.Messages[i])
-			}
-		}
-		sort.Slice(msgs, func(i, j int) bool { return int64(msgs[i].LogID) < int64(msgs[j].LogID) })
-		for _, m := range msgs {
-			d.handleRecord(ctx, apronws.Record{Kind: apronws.KindMessage, Message: m}, subscribe)
+		for _, ev := range events {
+			d.handleEvent(ctx, ev, subscribe)
 		}
 	}
 }
 
-// handleRecord processes one inbound push. Only message records carry
-// policy weight; room updates and activities are ignored. Two-phase
-// resolution: the reply-author lookup (a network call with a bounded
-// retry) runs outside procMu — holding the lock across it would stall
-// the live loop and catch-up. The author is pre-resolved before the
-// lock, only when the resident evaluation will actually need it: a
-// non-self reply in resident mode that is not a duplicate (a shared
-// daemon never wakes on replies, a self-post never wakes via reply,
-// and a duplicate is skipped by the dedupe). procMu is then held only
-// across the cursor check-then-act dedupe, evaluation, and enqueue;
-// delivery (the queue flush and shared callbacks) runs after the lock
-// is released so a slow deliverer cannot stall live processing or
-// catch-up.
-func (d *daemon) handleRecord(ctx context.Context, rec apronws.Record, subscribe bool) {
-	if rec.Kind != apronws.KindMessage || rec.Message == nil {
+// handleEvent processes one inbound event. Two-phase resolution: the
+// reply-author lookup (a network call with a bounded retry) runs
+// outside procMu — holding the lock across it would stall the live
+// loop and catch-up. The author is pre-resolved before the lock, only
+// when the resident evaluation will actually need it: a non-self reply
+// in resident mode that is not a duplicate (a shared daemon never
+// wakes on replies, a self-post never wakes via reply, and a duplicate
+// is skipped by the dedupe). procMu is then held only across the
+// cursor check-then-act dedupe, evaluation, and enqueue; delivery (the
+// queue flush and shared callbacks) runs after the lock is released so
+// a slow deliverer cannot stall live processing or catch-up.
+func (d *daemon) handleEvent(ctx context.Context, ev LinkEvent, subscribe bool) {
+	if ev.Kind != KindMessage {
 		return
 	}
-	m := rec.Message
 	// Pre-resolve the reply target's author outside procMu (see the
 	// comment above), only when the resident evaluation will need it:
 	// resident mode (a shared daemon never wakes on replies), a
@@ -284,14 +356,14 @@ func (d *daemon) handleRecord(ctx context.Context, rec apronws.Record, subscribe
 	var author string
 	var authorOK bool
 	var authorErr error
-	if d.cfg.Mode == ModeResident && m.ReplyTo != nil && m.From.UserID != d.cfg.Self.UserID {
-		cursor, err := d.store.GetCursor(ctx, m.RoomID)
-		if err != nil || int64(m.LogID) > cursor {
-			author, authorOK, authorErr = d.lookupAuthor(ctx, m.RoomID, m.ReplyTo.MessageID)
+	if d.cfg.Mode == ModeResident && ev.Msg.ReplyTo != "" && ev.Msg.From.UserID != d.cfg.Self.UserID {
+		cursor, err := d.store.GetCursor(ctx, ev.RoomID)
+		if err != nil || ev.Cursor > cursor {
+			author, authorOK, authorErr = d.lookupAuthor(ctx, ev.RoomID, ev.Msg.ReplyTo)
 		}
 	}
 	d.procMu.Lock()
-	deliveries, flush := d.processRecord(ctx, m, subscribe, author, authorOK, authorErr)
+	deliveries, flush := d.processEvent(ctx, ev, subscribe, author, authorOK, authorErr)
 	d.procMu.Unlock()
 	for _, h := range deliveries {
 		d.deliverShared(ctx, h)
@@ -301,61 +373,57 @@ func (d *daemon) handleRecord(ctx context.Context, rec apronws.Record, subscribe
 	}
 }
 
-// processRecord runs one message's cursor check-then-act dedupe,
+// processEvent runs one event's cursor check-then-act dedupe,
 // evaluation, and enqueue; it must be called with procMu held. The
 // reply target's author is pre-resolved by the caller (outside
-// procMu); processRecord passes it to the evaluation. It returns the
+// procMu); processEvent passes it to the evaluation. It returns the
 // shared-mode deliveries owed (the caller delivers them after
 // releasing procMu) and whether a queue flush is owed (a resident wake
 // was enqueued).
-func (d *daemon) processRecord(ctx context.Context, m *apronws.Message, subscribe bool, author string, authorOK bool, authorErr error) (deliveries []sharedHit, flush bool) {
-	// Dedupe against the room cursor: a replayed message (catch-up) or a
+func (d *daemon) processEvent(ctx context.Context, ev LinkEvent, subscribe bool, author string, authorOK bool, authorErr error) (deliveries []sharedHit, flush bool) {
+	m := ev.Msg
+	// Dedupe against the room cursor: a replayed event (catch-up) or a
 	// duplicate push at or below the cursor is already evaluated. The
 	// SetCursor max-upsert below advances the dedup line for both the
-	// live loop and the catch-up goroutine. LogID is a global sequence,
-	// so one per-room cursor suffices.
-	cursor, err := d.store.GetCursor(ctx, m.RoomID)
+	// live loop and the catch-up goroutine. The cursor is the
+	// transport's monotonic position (apron log_id, Slack ts in
+	// microseconds), so one per-room cursor suffices.
+	cursor, err := d.store.GetCursor(ctx, ev.RoomID)
 	if err != nil {
-		log.Printf("daemon: get cursor %s: %v", m.RoomID, err)
-	} else if int64(m.LogID) <= cursor {
+		log.Printf("daemon: get cursor %s: %v", ev.RoomID, err)
+	} else if ev.Cursor <= cursor {
 		return nil, false
 	}
-	// Feed the reply-author cache as records stream past, so a later
-	// reply to this message resolves without a History call. The author
-	// is known even for a delete tombstone.
-	d.hist.feed(m.MessageID, m.RoomID, m.From.UserID)
-	if err := d.store.SetCursor(ctx, m.RoomID, int64(m.LogID)); err != nil {
-		log.Printf("daemon: set cursor %s: %v", m.RoomID, err)
-	}
-	// A delete tombstone carries no body: nothing to evaluate, and the
-	// auto-subscription anchors on a body-carrying post.
-	if m.Body == nil || m.Deleted {
-		return nil, false
+	// Feed the reply-author cache as events stream past, so a later
+	// reply to this message resolves without a History call.
+	d.hist.feed(m.MessageID, ev.RoomID, m.From.UserID)
+	if err := d.store.SetCursor(ctx, ev.RoomID, ev.Cursor); err != nil {
+		log.Printf("daemon: set cursor %s: %v", ev.RoomID, err)
 	}
 	// The bot's own posts arm thread subscriptions and are never
 	// evaluated against the policy: no self-wake loops.
 	if m.From.UserID == d.cfg.Self.UserID {
-		if subscribe && m.ReplyTo != nil {
-			d.subscribeOwnThread(ctx, m)
+		if subscribe && m.ReplyTo != "" {
+			d.subscribeOwnThread(ctx, ev.RoomID, m.ReplyTo)
 		}
 		return nil, false
 	}
 	if d.cfg.Mode == ModeShared {
-		return d.handleSharedLocked(ctx, m), false
+		return d.handleSharedLocked(ctx, m, ev.ImageURL), false
 	}
-	return nil, d.handleResidentLocked(ctx, m, author, authorOK, authorErr)
+	return nil, d.handleResidentLocked(ctx, m, ev.ImageURL, author, authorOK, authorErr)
 }
 
 // subscribeOwnThread arms a subscription watch on the thread the bot
 // just posted to: thread posts anchor at the parent message, so the
-// push's reply_to is the thread root. Owner is this daemon's agent; TTL
-// is one day.
-func (d *daemon) subscribeOwnThread(ctx context.Context, m *apronws.Message) {
+// event's ReplyTo is the thread root. Owner is this daemon's agent;
+// TTL is one day.
+func (d *daemon) subscribeOwnThread(ctx context.Context, roomID, threadID string) {
 	_, err := d.store.AddWatch(ctx, store.Watch{
-		RoomID:   m.RoomID,
+		RoomID:   roomID,
 		Owner:    d.cfg.Agent,
 		Kind:     watch.KindSubscription,
-		ThreadID: m.ReplyTo.MessageID,
+		ThreadID: threadID,
 		Note:     "my thread post",
 	}, DefaultSubscribeTTL, d.now())
 	if err != nil {
@@ -370,8 +438,8 @@ func (d *daemon) subscribeOwnThread(ctx context.Context, m *apronws.Message) {
 // The reply target's author is pre-resolved by the caller (outside
 // procMu); the HistoryLookup returns that value without touching the
 // network. It reports whether a wake was enqueued (a flush is owed).
-func (d *daemon) handleResidentLocked(ctx context.Context, m *apronws.Message, author string, authorOK bool, authorErr error) bool {
-	msg := mapMsg(m)
+func (d *daemon) handleResidentLocked(ctx context.Context, m wake.Msg, imageURL string, author string, authorOK bool, authorErr error) bool {
+	msg := m
 	watches := d.roomWatches(ctx, m.RoomID)
 	var resident []store.Watch
 	for _, w := range watches {
@@ -385,7 +453,7 @@ func (d *daemon) handleResidentLocked(ctx context.Context, m *apronws.Message, a
 		Peers:   d.cfg.Peers,
 		Watches: resident,
 		// The author was pre-resolved outside procMu (see
-		// handleRecord); this lookup returns that value without
+		// handleEvent); this lookup returns that value without
 		// touching the network.
 		History: func(ctx context.Context, messageID string) (string, bool, error) {
 			return author, authorOK, authorErr
@@ -398,7 +466,7 @@ func (d *daemon) handleResidentLocked(ctx context.Context, m *apronws.Message, a
 		return false
 	}
 	env := BuildEnvelope(dec, msg)
-	env.ImageURL = firstImageURL(m)
+	env.ImageURL = imageURL
 	payload, err := encodePayload(env)
 	if err != nil {
 		log.Printf("daemon: encode wake: %v", err)
@@ -441,7 +509,7 @@ func (d *daemon) flushQueue(ctx context.Context) error {
 // lookupAuthor resolves the reply target's author, making up to
 // maxAttempts History calls (1 initial + 3 retries, a 1-second pause
 // between attempts, each attempt bounded by a 5-second timeout). It is
-// a network call and runs outside procMu (see handleRecord): holding
+// a network call and runs outside procMu (see handleEvent): holding
 // the lock across the retry would stall the live loop and catch-up.
 // The room cursor advances
 // after the lookup (regardless of its outcome), so catch-up will not
@@ -483,8 +551,8 @@ type sharedHit struct {
 // gone. Only watches whose owner has a delivery callback are evaluated:
 // a resident-owned watch has no callback and must not be fired (or its
 // once-watch consumed) by a shared daemon.
-func (d *daemon) handleSharedLocked(ctx context.Context, m *apronws.Message) []sharedHit {
-	msg := mapMsg(m)
+func (d *daemon) handleSharedLocked(ctx context.Context, m wake.Msg, imageURL string) []sharedHit {
+	msg := m
 	var watches []store.Watch
 	for _, w := range d.roomWatches(ctx, m.RoomID) {
 		if len(d.ownerCommand(ctx, w.Owner)) > 0 {
@@ -509,7 +577,7 @@ func (d *daemon) handleSharedLocked(ctx context.Context, m *apronws.Message) []s
 			Watches: []wake.WatchHit{hit},
 		}
 		env := BuildEnvelope(hitDec, msg)
-		env.ImageURL = firstImageURL(m)
+		env.ImageURL = imageURL
 		out = append(out, sharedHit{owner: hit.Owner, env: env, cmd: d.ownerCommand(ctx, hit.Owner)})
 	}
 	for _, id := range dec.RemoveWatchIDs {
@@ -612,42 +680,6 @@ func (d *daemon) roomWatches(ctx context.Context, roomID string) []store.Watch {
 		return nil
 	}
 	return ws
-}
-
-// mapMsg projects an apronws message onto the policy's Msg: mentions and
-// embeds decode leniently; pattern matching covers embed titles and
-// captions because attachments ride as embeds.
-func mapMsg(m *apronws.Message) wake.Msg {
-	msg := wake.Msg{
-		MessageID: m.MessageID,
-		RoomID:    m.RoomID,
-		From:      wake.From{UserID: m.From.UserID, Name: m.From.Name},
-	}
-	if m.ReplyTo != nil {
-		msg.ReplyTo = m.ReplyTo.MessageID
-	}
-	if m.Body != nil {
-		msg.Text = m.Body.Text
-		msg.Mentions = apronws.DecodeMentions(m.Body.Mentions)
-		for _, e := range apronws.DecodeEmbeds(m.Body.Embeds) {
-			msg.Embeds = append(msg.Embeds, wake.Embed{Title: e.Title, Caption: e.Caption})
-		}
-	}
-	return msg
-}
-
-// firstImageURL returns the first image embed's URL, "" when the message
-// carries none.
-func firstImageURL(m *apronws.Message) string {
-	if m.Body == nil {
-		return ""
-	}
-	for _, e := range apronws.DecodeEmbeds(m.Body.Embeds) {
-		if e.Kind == "image" && e.URL != "" {
-			return e.URL
-		}
-	}
-	return ""
 }
 
 // encodePayload marshals an envelope for the wake queue so a drained
