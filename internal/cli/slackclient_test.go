@@ -64,7 +64,8 @@ func newFakeSlackAPI(t *testing.T) (*fakeSlackAPI, *slack.Client) {
 			f.mu.Unlock()
 			w.Write([]byte(`{"ok":true,"channels":[
 				{"id":"C1","name":"general","is_member":true},
-				{"id":"C2","name":"random","is_member":false}
+				{"id":"C2","name":"random","is_member":false},
+				{"id":"D123","name":"","is_member":false}
 			]}`))
 		case "/conversations.history":
 			var p struct {
@@ -144,19 +145,23 @@ func TestSlackClientRoomList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RoomList: %v", err)
 	}
-	if len(res.Joined) != 1 || res.Joined[0].ID != "C1" || res.Joined[0].Title != "general" {
+	if len(res.Joined) != 2 || res.Joined[0].ID != "C1" || res.Joined[0].Title != "general" {
 		t.Fatalf("joined = %+v, want the is_member channel", res.Joined)
 	}
 	if len(res.NotJoined) != 1 || res.NotJoined[0].ID != "C2" {
 		t.Fatalf("notJoined = %+v, want the non-member channel", res.NotJoined)
 	}
+	if res.Joined[1].ID != "D123" {
+		t.Fatalf("joined = %+v, want the bot's IM counted as joined", res.Joined)
+	}
 	if len(f.lists) != 1 {
 		t.Fatalf("lists = %d, want 1", len(f.lists))
 	}
 	l := f.lists[0]
-	if len(l.Types) != 2 || l.Types[0] != "public_channel" || l.Types[1] != "private_channel" {
-		t.Fatalf("types = %v, want public_channel,private_channel", l.Types)
+	if len(l.Types) != 4 {
+		t.Fatalf("types = %v, want the same set as slackLink.Rooms", l.Types)
 	}
+
 	if !l.ExcludeArchived {
 		t.Fatalf("exclude_archived = false, want true")
 	}

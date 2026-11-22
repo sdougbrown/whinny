@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/sdougbrown/whinny/internal/apronws"
@@ -53,15 +54,21 @@ func (c *SlackClient) PostMessage(ctx context.Context, p apronws.PostParams) (ap
 	return apronws.PostResult{MessageID: res.TS}, nil
 }
 
-// RoomList lists unarchived public and private channels, following
-// cursors, and splits them by is_member: joined holds the channels the
-// bot is a member of, not-joined holds the rest.
+// RoomList lists unarchived channels, IMs, and MPIMs — the same type
+// set as the daemon's slackLink.Rooms, so receive and send agree on
+// which rooms exist (it shares the same known limitation: under a bot
+// token conversations.list returns no MPIMs) — following cursors and
+// splitting them: joined holds channels the bot is a member of and the
+// bot's own IMs (D-prefixed ids), not-joined holds the rest.
 func (c *SlackClient) RoomList(ctx context.Context, _ apronws.RoomListParams) (apronws.RoomListResult, error) {
 	var joined, notJoined []apronws.Room
 	cursor := ""
 	for {
+		// Same type set as the daemon's slackLink.Rooms, so receive
+		// and send agree on which rooms exist. IMs count as joined:
+		// the bot is by definition in its own IMs.
 		res, err := c.api.ConversationsList(ctx, slack.ListParams{
-			Types:           []string{"public_channel", "private_channel"},
+			Types:           []string{"public_channel", "private_channel", "mpim", "im"},
 			Cursor:          cursor,
 			Limit:           200,
 			ExcludeArchived: true,
@@ -71,7 +78,7 @@ func (c *SlackClient) RoomList(ctx context.Context, _ apronws.RoomListParams) (a
 		}
 		for _, ch := range res.Channels {
 			room := apronws.Room{ID: ch.ID, Title: ch.Name}
-			if ch.IsMember {
+			if ch.IsMember || strings.HasPrefix(ch.ID, "D") {
 				joined = append(joined, room)
 			} else {
 				notJoined = append(notJoined, room)
