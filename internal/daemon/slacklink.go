@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"sort"
 
 	"strings"
@@ -136,16 +135,14 @@ func (l *slackLink) slackEvent(ev slackws.Event) (LinkEvent, bool) {
 	}
 }
 
-// mentionRe matches a Slack user mention token, <@USERID>.
-var mentionRe = regexp.MustCompile(`<@([A-Z0-9]+)>`)
-
 // wakeMsg projects a Slack message onto the policy's Msg. Bot and app
 // messages carry no user: the bot's own posts (its bot_id) attribute to
 // the bot's user id (driving the self-post firebreak), while other
 // bots' posts attribute to "bot:"+bot_id so they evaluate as bot peers
-// instead of being swallowed by the firebreak. <@USERID> tokens in the
-// text are parsed into Mentions: a message and its app_mention share a
-// ts, so whichever wins the cursor dedupe race carries the mention.
+// instead of being swallowed by the firebreak. Mentions come from the
+// decode (slack.DecodeMessage parses <@USERID> tokens from the text):
+// a message and its app_mention share a ts, so whichever wins the
+// cursor dedupe race carries the mention.
 func (l *slackLink) wakeMsg(m slack.Msg) wake.Msg {
 	from := m.FromUserID
 	if from == "" && m.BotID != "" {
@@ -161,17 +158,8 @@ func (l *slackLink) wakeMsg(m slack.Msg) wake.Msg {
 		From:      wake.From{UserID: from},
 		Text:      m.Text,
 		ReplyTo:   m.ReplyTo,
-		Mentions:  parseMentions(m.Text),
+		Mentions:  m.Mentions,
 	}
-}
-
-// parseMentions extracts every <@USERID> token from text, in order.
-func parseMentions(text string) []string {
-	var out []string
-	for _, m := range mentionRe.FindAllStringSubmatch(text, -1) {
-		out = append(out, m[1])
-	}
-	return out
 }
 
 // Post posts to a channel, or to the thread the given ts started.

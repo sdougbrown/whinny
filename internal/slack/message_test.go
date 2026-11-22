@@ -22,9 +22,11 @@ func TestDecodeMessagePlain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeMessage: %v", err)
 	}
-	want := Msg{RoomID: "C1", MessageID: "1.1", FromUserID: "U1", Text: "hi", ReplyTo: "0.9"}
-	if m != want {
-		t.Errorf("Msg = %+v, want %+v", m, want)
+	if m.RoomID != "C1" || m.MessageID != "1.1" || m.FromUserID != "U1" || m.Text != "hi" || m.ReplyTo != "0.9" {
+		t.Errorf("Msg = %+v", m)
+	}
+	if len(m.Mentions) != 0 {
+		t.Errorf("Mentions = %v, want none", m.Mentions)
 	}
 }
 
@@ -126,5 +128,56 @@ func TestDecodeMessageTopLevelThreadTS(t *testing.T) {
 func TestDecodeMessageInvalid(t *testing.T) {
 	if _, err := DecodeMessage(json.RawMessage(`{`)); err == nil {
 		t.Fatal("DecodeMessage: want error for invalid JSON")
+	}
+}
+
+func TestParseMentions(t *testing.T) {
+	if got := ParseMentions("<@U9> do the thing"); len(got) != 1 || got[0] != "U9" {
+		t.Errorf("ParseMentions = %v, want [U9]", got)
+	}
+	if got := ParseMentions("<@U9> look at this and <@U1> too"); len(got) != 2 || got[0] != "U9" || got[1] != "U1" {
+		t.Errorf("ParseMentions = %v, want [U9 U1]", got)
+	}
+	if got := ParseMentions("plain text"); len(got) != 0 {
+		t.Errorf("ParseMentions = %v, want none", got)
+	}
+	if got := ParseMentions(""); len(got) != 0 {
+		t.Errorf("ParseMentions = %v, want none", got)
+	}
+}
+
+func TestDecodeMessagePopulatesMentions(t *testing.T) {
+	m, err := DecodeMessage(mustJSON(t, map[string]any{
+		"type": "message", "channel": "C1", "user": "U1",
+		"text": "<@U9> look at this and <@U1> too", "ts": "1.1",
+	}))
+	if err != nil {
+		t.Fatalf("DecodeMessage: %v", err)
+	}
+	if len(m.Mentions) != 2 || m.Mentions[0] != "U9" || m.Mentions[1] != "U1" {
+		t.Errorf("Mentions = %v, want [U9 U1]", m.Mentions)
+	}
+	// A plain message carries no Mentions.
+	m2, err := DecodeMessage(mustJSON(t, map[string]any{
+		"type": "message", "channel": "C1", "user": "U1", "text": "hi", "ts": "1.2",
+	}))
+	if err != nil {
+		t.Fatalf("DecodeMessage: %v", err)
+	}
+	if len(m2.Mentions) != 0 {
+		t.Errorf("Mentions = %v, want none", m2.Mentions)
+	}
+	// Edits unwrap to the inner message; its mentions are parsed too.
+	inner := map[string]any{
+		"type": "message", "user": "U1", "text": "<@U2> edited", "ts": "1.1",
+	}
+	m3, err := DecodeMessage(mustJSON(t, map[string]any{
+		"type": "message", "channel": "C1", "subtype": "message_changed", "message": inner,
+	}))
+	if err != nil {
+		t.Fatalf("DecodeMessage: %v", err)
+	}
+	if len(m3.Mentions) != 1 || m3.Mentions[0] != "U2" {
+		t.Errorf("Mentions = %v, want [U2]", m3.Mentions)
 	}
 }

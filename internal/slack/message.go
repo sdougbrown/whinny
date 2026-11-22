@@ -3,6 +3,7 @@ package slack
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 )
 
 // Msg is the daemon-facing message shape the wake policy and cursor
@@ -22,6 +23,9 @@ type Msg struct {
 	ReplyTo string
 	// Subtype is Slack's message subtype ("" for plain messages).
 	Subtype string
+	// Mentions is the <@USERID> user ids parsed from Text (nil when
+	// the text carries no mention token).
+	Mentions []string
 	// Edited marks an edit: a message_changed wrapper or a message
 	// carrying an edited marker.
 	Edited bool
@@ -56,7 +60,7 @@ type wireMessage struct {
 // DecodeMessage maps a Slack message event payload to the daemon-facing
 // Msg shape. Edits arrive as message_changed wrappers and unwrap to the
 // inner message with Edited set; deletes arrive as message_deleted and
-// yield DeletedTS.
+// yield DeletedTS. Mentions are parsed from the text into Msg.Mentions.
 func DecodeMessage(payload json.RawMessage) (Msg, error) {
 	var w wireMessage
 	if err := json.Unmarshal(payload, &w); err != nil {
@@ -90,7 +94,9 @@ func DecodeMessage(payload json.RawMessage) (Msg, error) {
 // decodeWire maps one wire message to Msg. Slack sets thread_ts == ts
 // on thread-root (top-level) messages, so a non-empty thread_ts that
 // equals the message's own ts is not a reply: only genuine thread
-// replies carry a different thread_ts.
+// replies carry a different thread_ts. Mentions are parsed from the
+// text here, so every decoded message (live events and history) carries
+// them.
 func decodeWire(w wireMessage) Msg {
 	replyTo := w.ThreadTS
 	if replyTo == w.TS {
@@ -104,5 +110,18 @@ func decodeWire(w wireMessage) Msg {
 		Text:       w.Text,
 		ReplyTo:    replyTo,
 		Subtype:    w.Subtype,
+		Mentions:   ParseMentions(w.Text),
 	}
+}
+
+// mentionRe matches a Slack user mention token, <@USERID>.
+var mentionRe = regexp.MustCompile(`<@([A-Z0-9]+)>`)
+
+// ParseMentions extracts every <@USERID> token from text, in order.
+func ParseMentions(text string) []string {
+	var out []string
+	for _, m := range mentionRe.FindAllStringSubmatch(text, -1) {
+		out = append(out, m[1])
+	}
+	return out
 }
