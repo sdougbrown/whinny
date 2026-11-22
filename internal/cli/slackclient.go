@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"sort"
+	"sync"
 
 	"github.com/sdougbrown/whinny/internal/apronws"
 	"github.com/sdougbrown/whinny/internal/slack"
@@ -19,6 +20,12 @@ import (
 // (is_member false), so room resolution by id still reaches them.
 type SlackClient struct {
 	api *slack.Client
+	// selfMu guards the bot identity resolved lazily by History so
+	// bot-authored messages attribute the same way the daemon
+	// attributes them (shared slack.AuthorID rule).
+	selfMu     sync.Mutex
+	selfUserID string
+	selfBotID  string
 }
 
 // NewSlackClient wraps a Slack Web API client as a RoomClient.
@@ -93,14 +100,14 @@ func (c *SlackClient) History(ctx context.Context, p apronws.HistoryParams) (apr
 	sort.Slice(res.Messages, func(i, j int) bool {
 		return slack.TSToCursor(res.Messages[i].MessageID) < slack.TSToCursor(res.Messages[j].MessageID)
 	})
+	if err := c.resolveSelf(ctx); err != nil {
+		return apronws.HistoryResult{}, err
+	}
 	msgs := make([]apronws.Message, 0, len(res.Messages))
 	for _, m := range res.Messages {
 		// The ts converts to a log position so --since/--before
 		// filtering works on Slack; per-channel ordering is preserved.
-		from := m.FromUserID
-		if from == "" && m.BotID != "" {
-			from = "bot:" + m.BotID
-		}
+		from := slack.AuthorID(m.FromUserID, m.BotID, c.selfUserID, c.selfBotID)
 		msg := apronws.Message{
 			LogID:     apronws.LogID(slack.TSToCursor(m.MessageID)),
 			MessageID: m.MessageID,
@@ -129,3 +136,19 @@ func (c *SlackClient) JoinRoom(_ context.Context, _ string) error { return nil }
 
 // Close is a no-op: the Web API client holds no connection.
 func (c *SlackClient) Close() {}
+
+// resolveSelf resolves the bot's identity once via auth.test; the
+// attribution rule needs it to map the bot's own posts to its user id.
+func (c *SlackClient) resolveSelf(ctx context.Context) error {
+	c.selfMu.Lock()
+	defer c.selfMu.Unlock()
+	if c.selfUserID != "" {
+		return nil
+	}
+	res, err := c.api.AuthTest(ctx)
+	if err != nil {
+		return err
+	}
+	c.selfUserID, c.selfBotID = res.UserID, res.BotID
+	return nil
+}

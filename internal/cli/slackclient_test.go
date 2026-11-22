@@ -20,6 +20,9 @@ type fakeSlackAPI struct {
 	posts     []slack.PostParams
 	lists     []slack.ListParams
 	histories []slack.HistoryParams
+	// historyJSON overrides the canned conversations.history payload
+	// when set (tests that need specific message shapes).
+	historyJSON string
 }
 
 func newFakeSlackAPI(t *testing.T) (*fakeSlackAPI, *slack.Client) {
@@ -72,11 +75,17 @@ func newFakeSlackAPI(t *testing.T) (*fakeSlackAPI, *slack.Client) {
 			f.mu.Lock()
 			f.histories = append(f.histories, slack.HistoryParams{Channel: p.Channel, Limit: p.Limit})
 			f.mu.Unlock()
+			if f.historyJSON != "" {
+				w.Write([]byte(f.historyJSON))
+				return
+			}
 			w.Write([]byte(`{"ok":true,"messages":[
 				{"type":"message","user":"U1","text":"hello","ts":"1700000000.000100"},
 				{"type":"message","user":"U2","text":"reply","ts":"1700000000.000200","thread_ts":"1700000000.000100"},
 				{"type":"message","bot_id":"B1","text":"from the bot","ts":"1700000000.000300"}
 			]}`))
+		case "/auth.test":
+			w.Write([]byte(`{"ok":true,"user_id":"U-SELF","bot_id":"B-SELF"}`))
 		default:
 			w.Write([]byte(`{"ok":false,"error":"not_mocked"}`))
 		}
@@ -217,4 +226,26 @@ func TestSlackClientJoinRoom(t *testing.T) {
 		t.Fatalf("JoinRoom = %v, want a no-op", err)
 	}
 	c.Close()
+}
+
+// TestSlackClientHistorySelfBotAttribution: the resolving bot's own
+// posts attribute to its user id (not bot:<bot id>), matching the
+// daemon's wake evaluation — one identity per sender on both paths.
+func TestSlackClientHistorySelfBotAttribution(t *testing.T) {
+	f, api := newFakeSlackAPI(t)
+	f.historyJSON = `{"ok":true,"messages":[
+		{"type":"message","bot_id":"B-SELF","text":"my own post","ts":"1700000000.000400"}
+	]}`
+	c := NewSlackClient(api)
+
+	res, err := c.History(context.Background(), apronws.HistoryParams{RoomID: "C1", Limit: 20})
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	if len(res.Messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(res.Messages))
+	}
+	if got := res.Messages[0].From.UserID; got != "U-SELF" {
+		t.Fatalf("from = %q, want the bot's own user id U-SELF", got)
+	}
 }

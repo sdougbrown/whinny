@@ -88,6 +88,14 @@ func PostHandler(d Deps) clicontract.HandleFunc {
 		}
 		client, owned, err := d.connect(ctx, inv)
 		if err != nil {
+			// Connect-stage usage errors (missing slack token,
+			// unknown transport) are caller mistakes, not bad send
+			// outcomes: refund without counting toward the breaker.
+			var uerr *Error
+			if errors.As(err, &uerr) && uerr.Class == ClassUsage {
+				bucket.Refund()
+				return nil, err
+			}
 			return failSend(err)
 		}
 		if owned {

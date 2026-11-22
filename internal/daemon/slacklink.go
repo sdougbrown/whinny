@@ -144,14 +144,7 @@ func (l *slackLink) slackEvent(ev slackws.Event) (LinkEvent, bool) {
 // a message and its app_mention share a ts, so whichever wins the
 // cursor dedupe race carries the mention.
 func (l *slackLink) wakeMsg(m slack.Msg) wake.Msg {
-	from := m.FromUserID
-	if from == "" && m.BotID != "" {
-		if m.BotID == l.botID {
-			from = l.selfUserID
-		} else {
-			from = "bot:" + m.BotID
-		}
-	}
+	from := slack.AuthorID(m.FromUserID, m.BotID, l.selfUserID, l.botID)
 	return wake.Msg{
 		MessageID: m.MessageID,
 		RoomID:    m.RoomID,
