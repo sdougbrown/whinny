@@ -77,10 +77,11 @@ func (h *historyCache) lookup(ctx context.Context, roomID, messageID string) (st
 	defer h.mu.Unlock()
 	for _, ev := range events {
 		m := ev.Msg
-		if _, seen := h.seen[m.MessageID]; !seen {
-			h.order = append(h.order, m.MessageID)
+		key := m.RoomID + "\x00" + m.MessageID
+		if _, seen := h.seen[key]; !seen {
+			h.order = append(h.order, key)
 		}
-		h.seen[roomID+"\x00"+m.MessageID] = histEntry{author: m.From.UserID, room: m.RoomID, ok: true}
+		h.seen[key] = histEntry{author: m.From.UserID, room: m.RoomID, ok: true}
 	}
 	// A target outside the fetched window is a miss, cached as such.
 	if e, ok := h.seen[key]; ok {
