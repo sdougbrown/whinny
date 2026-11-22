@@ -102,15 +102,11 @@ func (l *slackLink) slackEvent(ev slackws.Event) (LinkEvent, bool) {
 			return LinkEvent{}, false
 		}
 		return LinkEvent{
-			Kind:   KindMessage,
-			RoomID: m.RoomID,
-			Msg:    l.wakeMsg(m),
-			Cursor: slack.TSToCursor(m.MessageID),
-			// ImageURL is left empty on Slack: Slack image embeds need
-			// bearer-authenticated fetches the transport-agnostic
-			// deliverer doesn't carry, so Slack watch hits deliver
-			// text-only envelopes (apron fills it; auth-aware fetches
-			// are follow-up work).
+			Kind:     KindMessage,
+			RoomID:   m.RoomID,
+			Msg:      l.wakeMsg(m),
+			Cursor:   slack.TSToCursor(m.MessageID),
+			ImageURL: m.ImageURL,
 		}, true
 	case "app_mention":
 		// Decode through the same path as the message branch so both
@@ -125,10 +121,11 @@ func (l *slackLink) slackEvent(ev slackws.Event) (LinkEvent, bool) {
 		msg := l.wakeMsg(m)
 		msg.Mentions = []string{l.selfUserID}
 		return LinkEvent{
-			Kind:   KindMessage,
-			RoomID: m.RoomID,
-			Msg:    msg,
-			Cursor: slack.TSToCursor(m.MessageID),
+			Kind:     KindMessage,
+			RoomID:   m.RoomID,
+			Msg:      msg,
+			Cursor:   slack.TSToCursor(m.MessageID),
+			ImageURL: m.ImageURL,
 		}, true
 	default:
 		return LinkEvent{}, false
@@ -186,10 +183,11 @@ func (l *slackLink) History(ctx context.Context, roomID string, after int64, lim
 			continue
 		}
 		out = append(out, LinkEvent{
-			Kind:   KindMessage,
-			RoomID: m.RoomID,
-			Msg:    l.wakeMsg(m),
-			Cursor: cursor,
+			Kind:     KindMessage,
+			RoomID:   m.RoomID,
+			Msg:      l.wakeMsg(m),
+			ImageURL: m.ImageURL,
+			Cursor:   cursor,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Cursor < out[j].Cursor })

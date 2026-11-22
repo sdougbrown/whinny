@@ -296,3 +296,67 @@ func TestSlackEventDropsRoomMetadataSubtypes(t *testing.T) {
 		t.Fatalf("plain message text = %q", ev.Msg.Text)
 	}
 }
+
+// TestSlackEventImageURL: a message with an image file carries the
+// file's url_private in ImageURL; a message with an attachment
+// image_url carries that; a message with neither (or only a
+// non-image file) carries an empty ImageURL.
+func TestSlackEventImageURL(t *testing.T) {
+	l := &slackLink{selfUserID: "U9"}
+	ev, ok := l.slackEvent(slackws.Event{Type: "message", Payload: json.RawMessage(
+		`{"type":"message","channel":"C1","user":"U1","text":"look","ts":"1700000000.000500","files":[{"mimetype":"image/png","url_private":"https://files.slack.com/abc.png"}]}`)})
+	if !ok {
+		t.Fatal("message event dropped")
+	}
+	if ev.ImageURL != "https://files.slack.com/abc.png" {
+		t.Errorf("image url = %q, want the file's url_private", ev.ImageURL)
+	}
+	ev2, ok := l.slackEvent(slackws.Event{Type: "message", Payload: json.RawMessage(
+		`{"type":"message","channel":"C1","user":"U1","text":"look","ts":"1700000000.000510","attachments":[{"image_url":"https://files.slack.com/thumb.png"}]}`)})
+	if !ok {
+		t.Fatal("message event dropped")
+	}
+	if ev2.ImageURL != "https://files.slack.com/thumb.png" {
+		t.Errorf("image url = %q, want the attachment's image_url", ev2.ImageURL)
+	}
+	ev3, ok := l.slackEvent(slackws.Event{Type: "message", Payload: json.RawMessage(
+		`{"type":"message","channel":"C1","user":"U1","text":"plain","ts":"1700000000.000520","files":[{"mimetype":"application/pdf","url_private":"https://files.slack.com/x.pdf"}]}`)})
+	if !ok {
+		t.Fatal("message event dropped")
+	}
+	if ev3.ImageURL != "" {
+		t.Errorf("image url = %q, want empty (no image file)", ev3.ImageURL)
+	}
+	// An off-slack.com attachment image_url is not selected: the
+	// fetcher would refuse it, so selection and fetch agree.
+	ev4, ok := l.slackEvent(slackws.Event{Type: "message", Payload: json.RawMessage(
+		`{"type":"message","channel":"C1","user":"U1","text":"unfurl","ts":"1700000000.000530","attachments":[{"image_url":"https://cdn.example.com/pic.png"}]}`)})
+	if !ok {
+		t.Fatal("message event dropped")
+	}
+	if ev4.ImageURL != "" {
+		t.Errorf("image url = %q, want empty (off-slack.com host)", ev4.ImageURL)
+	}
+}
+
+// TestSlackHistoryImageURL: catch-up history carries the same
+// ImageURL the live path sets, so a wake replayed after downtime
+// keeps its image embed.
+func TestSlackHistoryImageURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true,"messages":[
+			{"type":"message","user":"U1","text":"look","ts":"1700000000.000500","files":[{"mimetype":"image/png","url_private":"https://files.slack.com/abc.png"}]}
+		]}`))
+	}))
+	t.Cleanup(srv.Close)
+	l := newSlackLink(slack.NewClient("xoxb-test", slack.WithBaseURL(srv.URL)), nil)
+
+	evs, err := l.History(context.Background(), "C1", 0, 20)
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	if len(evs) != 1 || evs[0].ImageURL != "https://files.slack.com/abc.png" {
+		t.Fatalf("events = %+v, want one with the file's url_private", evs)
+	}
+}

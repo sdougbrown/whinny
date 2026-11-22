@@ -85,7 +85,8 @@ func TestFeedDelivererFetchesImage(t *testing.T) {
 
 	var buf bytes.Buffer
 	u, _ := url.Parse(imgSrv.URL)
-	d := &feedDeliverer{out: &buf, originScheme: u.Scheme, originHost: u.Host}
+	apron := newApronFetcher(u.Scheme, u.Host)
+	d := &feedDeliverer{out: &buf, fetch: apron}
 	t.Cleanup(d.cleanup)
 	env := Envelope{Text: "with image", From: "u1", ImageURL: imgSrv.URL}
 	if err := d.Deliver(context.Background(), "agent", env); err != nil {
@@ -119,7 +120,8 @@ func TestFeedDelivererImageTooLarge(t *testing.T) {
 
 	var buf bytes.Buffer
 	u, _ := url.Parse(imgSrv.URL)
-	d := &feedDeliverer{out: &buf, originScheme: u.Scheme, originHost: u.Host}
+	apron := newApronFetcher(u.Scheme, u.Host)
+	d := &feedDeliverer{out: &buf, fetch: apron}
 	t.Cleanup(d.cleanup)
 	env := Envelope{Text: "big", From: "u1", ImageURL: imgSrv.URL}
 	if err := d.Deliver(context.Background(), "agent", env); err != nil {
@@ -183,7 +185,8 @@ func TestFeedDelivererRefusesCrossOrigin(t *testing.T) {
 	ou, _ := url.Parse(originSrv.URL)
 
 	var buf bytes.Buffer
-	d := &feedDeliverer{out: &buf, originScheme: ou.Scheme, originHost: ou.Host}
+	apron := newApronFetcher(ou.Scheme, ou.Host)
+	d := &feedDeliverer{out: &buf, fetch: apron}
 	t.Cleanup(d.cleanup)
 	env := Envelope{Text: "x", From: "u1", ImageURL: otherSrv.URL}
 	if err := d.Deliver(context.Background(), "agent", env); err != nil {
@@ -217,7 +220,8 @@ func TestFeedDelivererRefusesCrossOriginRedirect(t *testing.T) {
 	ou, _ := url.Parse(originSrv.URL)
 
 	var buf bytes.Buffer
-	d := &feedDeliverer{out: &buf, originScheme: ou.Scheme, originHost: ou.Host}
+	apron := newApronFetcher(ou.Scheme, ou.Host)
+	d := &feedDeliverer{out: &buf, fetch: apron}
 	t.Cleanup(d.cleanup)
 	env := Envelope{Text: "x", From: "u1", ImageURL: originSrv.URL}
 	if err := d.Deliver(context.Background(), "agent", env); err != nil {
@@ -248,7 +252,8 @@ func TestFeedDelivererFollowsSameOriginRedirect(t *testing.T) {
 	u, _ := url.Parse(srv.URL)
 
 	var buf bytes.Buffer
-	d := &feedDeliverer{out: &buf, originScheme: u.Scheme, originHost: u.Host}
+	apron := newApronFetcher(u.Scheme, u.Host)
+	d := &feedDeliverer{out: &buf, fetch: apron}
 	t.Cleanup(d.cleanup)
 	env := Envelope{Text: "x", From: "u1", ImageURL: srv.URL + "/redirect"}
 	if err := d.Deliver(context.Background(), "agent", env); err != nil {
@@ -273,7 +278,8 @@ func TestFeedDelivererTempDirCap(t *testing.T) {
 	u, _ := url.Parse(srv.URL)
 
 	var buf bytes.Buffer
-	d := &feedDeliverer{out: &buf, originScheme: u.Scheme, originHost: u.Host}
+	apron := newApronFetcher(u.Scheme, u.Host)
+	d := &feedDeliverer{out: &buf, fetch: apron}
 	t.Cleanup(d.cleanup)
 	for i := 0; i < maxImageFiles+5; i++ {
 		env := Envelope{Text: "x", From: "u1", ImageURL: srv.URL}
@@ -293,5 +299,147 @@ func TestFeedDelivererTempDirCap(t *testing.T) {
 	}
 	if len(entries) > maxImageFiles {
 		t.Errorf("dir entries = %d, want <= %d", len(entries), maxImageFiles)
+	}
+}
+
+// TestSlackFetcherSendsBearerAuth: the Slack fetcher sends the bot
+// token as a bearer header and returns the bytes and media type.
+func TestSlackFetcherSendsBearerAuth(t *testing.T) {
+	png := append([]byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}, bytes.Repeat([]byte{0}, 100)...)
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(png)
+	}))
+	defer srv.Close()
+
+	f := newSlackFetcher("xoxb-test-token")
+	f.hostAllowed = func(string) bool { return true }
+	data, media, err := f.Fetch(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if gotAuth != "Bearer xoxb-test-token" {
+		t.Errorf("authorization = %q, want the bot token bearer", gotAuth)
+	}
+	if !bytes.Equal(data, png) {
+		t.Errorf("bytes = %d long, want %d", len(data), len(png))
+	}
+	if media != "image/png" {
+		t.Errorf("media = %q, want image/png", media)
+	}
+}
+
+// TestSlackFetcherRefusesOffOrigin: a URL off a slack.com host is
+// refused without a fetch (SSRF guard).
+func TestSlackFetcherRefusesOffOrigin(t *testing.T) {
+	fetched := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fetched = true
+		w.Write([]byte("x"))
+	}))
+	defer srv.Close()
+
+	f := newSlackFetcher("xoxb-test-token")
+	if _, _, err := f.Fetch(context.Background(), srv.URL); err == nil {
+		t.Error("off-origin fetch succeeded, want refused")
+	}
+	if fetched {
+		t.Error("off-origin URL was fetched, want refused")
+	}
+}
+
+// TestSlackFetcherRefusesOffOriginRedirect: a fetch that redirects off
+// the allowed host is refused (the CheckRedirect guard).
+func TestSlackFetcherRefusesOffOriginRedirect(t *testing.T) {
+	otherFetched := false
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		otherFetched = true
+		w.Write([]byte("x"))
+	}))
+	defer other.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL, http.StatusFound)
+	}))
+	defer origin.Close()
+
+	f := newSlackFetcher("xoxb-test-token")
+	// The origin host is allowed; the redirect target is not.
+	ou, _ := url.Parse(origin.URL)
+	f.hostAllowed = func(host string) bool { return host == ou.Host }
+	if _, _, err := f.Fetch(context.Background(), origin.URL); err == nil {
+		t.Error("off-origin redirect was followed, want refused")
+	}
+	if otherFetched {
+		t.Error("redirect target was fetched, want refused")
+	}
+}
+
+// TestFeedDelivererWithSlackFetcher: an injected Slack fetcher
+// (instead of the apron fallback) fetches the embed with bearer auth
+// and the record carries the image by path.
+func TestFeedDelivererWithSlackFetcher(t *testing.T) {
+	png := append([]byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}, bytes.Repeat([]byte{0}, 100)...)
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(png)
+	}))
+	defer srv.Close()
+
+	f := newSlackFetcher("xoxb-test-token")
+	f.hostAllowed = func(string) bool { return true }
+	var buf bytes.Buffer
+	d := &feedDeliverer{out: &buf, fetch: f}
+	t.Cleanup(d.cleanup)
+	env := Envelope{Text: "with image", From: "u1", ImageURL: srv.URL}
+	if err := d.Deliver(context.Background(), "agent", env); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	if gotAuth != "Bearer xoxb-test-token" {
+		t.Errorf("authorization = %q, want the bot token bearer", gotAuth)
+	}
+	var rec FeedRecord
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if rec.Image == nil {
+		t.Fatal("record has no image")
+	}
+	b, err := os.ReadFile(rec.Image.Path)
+	if err != nil {
+		t.Fatalf("read image: %v", err)
+	}
+	if !bytes.Equal(b, png) {
+		t.Errorf("image bytes = %d long, want %d", len(b), len(png))
+	}
+	if rec.Image.Media != "image/png" {
+		t.Errorf("media = %q, want image/png", rec.Image.Media)
+	}
+}
+
+// TestSlackFetcherRefusesDowngrade: a redirect to a slack.com host
+// over http is refused — the posture is scheme-and-host, matching the
+// apron fetcher.
+func TestSlackFetcherRefusesDowngrade(t *testing.T) {
+	var calls int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			http.Redirect(w, r, "http://files.slack.com/img.png", http.StatusFound)
+			return
+		}
+		w.Write([]byte("plaintext"))
+	}))
+	t.Cleanup(ts.Close)
+	f := newSlackFetcher("xoxb-test")
+	// The origin host is allowed; the redirect downgrades to http.
+	u, _ := url.Parse(ts.URL)
+	f.hostAllowed = func(host string) bool { return host == u.Host }
+	_, _, err := f.Fetch(context.Background(), ts.URL+"/start")
+	if err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("err = %v, want an https refusal", err)
 	}
 }
