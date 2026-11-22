@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"sort"
 
 	"github.com/sdougbrown/whinny/internal/apronws"
 	"github.com/sdougbrown/whinny/internal/slack"
@@ -87,12 +88,24 @@ func (c *SlackClient) History(ctx context.Context, p apronws.HistoryParams) (apr
 	if err != nil {
 		return apronws.HistoryResult{}, err
 	}
+	// Slack returns newest first; the history contract is oldest
+	// first, matching the daemon's slackLink ordering.
+	sort.Slice(res.Messages, func(i, j int) bool {
+		return slack.TSToCursor(res.Messages[i].MessageID) < slack.TSToCursor(res.Messages[j].MessageID)
+	})
 	msgs := make([]apronws.Message, 0, len(res.Messages))
 	for _, m := range res.Messages {
+		// The ts converts to a log position so --since/--before
+		// filtering works on Slack; per-channel ordering is preserved.
+		from := m.FromUserID
+		if from == "" && m.BotID != "" {
+			from = "bot:" + m.BotID
+		}
 		msg := apronws.Message{
+			LogID:     apronws.LogID(slack.TSToCursor(m.MessageID)),
 			MessageID: m.MessageID,
 			RoomID:    m.RoomID,
-			From:      apronws.From{UserID: m.FromUserID},
+			From:      apronws.From{UserID: from},
 			Body:      &apronws.Body{Text: m.Text},
 			Deleted:   m.DeletedTS != "",
 		}

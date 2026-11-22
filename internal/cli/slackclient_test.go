@@ -74,7 +74,8 @@ func newFakeSlackAPI(t *testing.T) (*fakeSlackAPI, *slack.Client) {
 			f.mu.Unlock()
 			w.Write([]byte(`{"ok":true,"messages":[
 				{"type":"message","user":"U1","text":"hello","ts":"1700000000.000100"},
-				{"type":"message","user":"U2","text":"reply","ts":"1700000000.000200","thread_ts":"1700000000.000100"}
+				{"type":"message","user":"U2","text":"reply","ts":"1700000000.000200","thread_ts":"1700000000.000100"},
+				{"type":"message","bot_id":"B1","text":"from the bot","ts":"1700000000.000300"}
 			]}`))
 		default:
 			w.Write([]byte(`{"ok":false,"error":"not_mocked"}`))
@@ -154,8 +155,8 @@ func TestSlackClientHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("History: %v", err)
 	}
-	if len(res.Messages) != 2 {
-		t.Fatalf("messages = %d, want 2", len(res.Messages))
+	if len(res.Messages) != 3 {
+		t.Fatalf("messages = %d, want 3", len(res.Messages))
 	}
 	m0 := res.Messages[0]
 	if m0.MessageID != "1700000000.000100" || m0.RoomID != "C1" {
@@ -173,6 +174,19 @@ func TestSlackClientHistory(t *testing.T) {
 	m1 := res.Messages[1]
 	if m1.ReplyTo == nil || m1.ReplyTo.MessageID != "1700000000.000100" {
 		t.Fatalf("second reply-to = %+v, want the thread parent ts", m1.ReplyTo)
+	}
+	// The ts converts to a log position so cursor filtering works, and
+	// the mapping keeps the contract's oldest-first order (Slack's wire
+	// order is newest first).
+	if m0.LogID != apronws.LogID(slack.TSToCursor("1700000000.000100")) {
+		t.Fatalf("first log_id = %d, want the ts-derived cursor", m0.LogID)
+	}
+	if m1.LogID <= m0.LogID {
+		t.Fatalf("log ids = %d then %d, want ascending (oldest first)", m0.LogID, m1.LogID)
+	}
+	m2 := res.Messages[2]
+	if m2.From.UserID != "bot:B1" {
+		t.Fatalf("bot message from = %+v, want bot:B1 (no blank author)", m2.From)
 	}
 	if len(f.histories) != 1 || f.histories[0].Channel != "C1" || f.histories[0].Limit != 20 {
 		t.Fatalf("histories = %+v, want channel C1 limit 20", f.histories)

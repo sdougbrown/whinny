@@ -71,7 +71,7 @@ func (d Deps) connect(ctx context.Context, inv clicontract.Invocation) (RoomClie
 		return d.Client, false, nil
 	}
 	switch d.env()("WHINNY_TRANSPORT") {
-	case "", "apron":
+	case "", string(daemon.TransportApron):
 		cfg, err := ResolveConfig(inv.Flags["url"], inv.Flags["token"], d.env())
 		if err != nil {
 			return nil, false, err
@@ -84,14 +84,14 @@ func (d Deps) connect(ctx context.Context, inv clicontract.Invocation) (RoomClie
 			return nil, false, OperationalErrorf("connect to %s: %v", cfg.URL, err)
 		}
 		return c, true, nil
-	case "slack":
+	case string(daemon.TransportSlack):
 		token := d.env()("SLACK_BOT_TOKEN")
 		if token == "" {
 			return nil, false, UsageErrorf("slack transport: set SLACK_BOT_TOKEN")
 		}
 		return NewSlackClient(slack.NewClient(token)), true, nil
 	default:
-		return nil, false, UsageErrorf("unknown WHINNY_TRANSPORT %q (want apron or slack)", d.env()("WHINNY_TRANSPORT"))
+		return nil, false, UsageErrorf("unknown WHINNY_TRANSPORT %q (want %s or %s)", d.env()("WHINNY_TRANSPORT"), daemon.TransportApron, daemon.TransportSlack)
 	}
 }
 

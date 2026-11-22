@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -113,6 +114,16 @@ func PostHandler(d Deps) clicontract.HandleFunc {
 				Title:        threadTitle(text),
 			})
 			if err != nil {
+				// A usage error (the slack transport's permanent
+				// "threads are not rooms" refusal, for one) is a
+				// caller mistake, not a bad send outcome: refund
+				// without counting toward the breaker, matching
+				// ResolveRoom.
+				var uerr *Error
+				if errors.As(err, &uerr) && uerr.Class == ClassUsage {
+					bucket.Refund()
+					return nil, err
+				}
 				return failSend(OperationalErrorf("create thread: %v", err))
 			}
 			postRoom = t.ID

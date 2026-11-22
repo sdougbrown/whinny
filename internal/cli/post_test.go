@@ -413,3 +413,42 @@ func TestPostRefundsRateTokenWhenConnectFails(t *testing.T) {
 		t.Fatalf("tokens = %v, want 1 (refunded after a failed connect)", tok)
 	}
 }
+
+// TestPostThreadOfOnSlackDoesNotCountTowardBreaker: the slack
+// transport's permanent --thread-of refusal is a usage error, so five
+// attempts leave the breaker unlatched and every error stays
+// usage-class; the guard's rate tokens are refunded each time.
+func TestPostThreadOfOnSlackDoesNotCountTowardBreaker(t *testing.T) {
+	_, api := newFakeSlackAPI(t)
+	path := filepath.Join(t.TempDir(), "state.db")
+	s, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	d := Deps{Client: NewSlackClient(api), Env: func(string) string { return "" }, Store: s}
+	for i := 0; i < 5; i++ {
+		_, err := PostHandler(d)(context.Background(),
+			inv("post", []string{"hello"}, map[string]string{"room": "general", "thread-of": "m1"}, nil), io.Discard)
+		if err == nil {
+			t.Fatalf("post %d: want an error, got nil", i)
+		}
+		if e, ok := err.(*Error); !ok || e.Class != ClassUsage {
+			t.Fatalf("post %d: err = %v, want a usage-class error", i, err)
+		}
+	}
+	brk, err := s.GetBreaker(context.Background())
+	if err != nil {
+		t.Fatalf("GetBreaker: %v", err)
+	}
+	if brk.Latched {
+		t.Fatalf("breaker latched: usage refusals must not count as bad send outcomes")
+	}
+	v, err := s.GetMeta(context.Background(), store.MetaPostFailures)
+	if err != nil {
+		t.Fatalf("GetMeta: %v", err)
+	}
+	if v != "" {
+		t.Fatalf("post failures = %q, want none", v)
+	}
+}
