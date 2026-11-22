@@ -53,12 +53,13 @@ func (c *SlackClient) PostMessage(ctx context.Context, p apronws.PostParams) (ap
 	return apronws.PostResult{MessageID: res.TS}, nil
 }
 
-// RoomList lists unarchived channels, IMs, and MPIMs — the same type
-// set as the daemon's slackLink.Rooms, so receive and send agree on
-// which rooms exist (it shares the same known limitation: under a bot
-// token conversations.list returns no MPIMs) — following cursors and
-// splitting them: joined holds channels the bot is a member of and the
-// bot's own IMs (D-prefixed ids), not-joined holds the rest.
+// RoomList lists unarchived channels, IMs, and MPIMs — the same
+// listing as the daemon's slackLink.Rooms (same type set, archived
+// channels excluded on both), so receive and send agree on which rooms
+// exist; it shares the same known limitation: under a bot token
+// conversations.list returns no MPIMs. It follows cursors and splits
+// the result: joined holds channels the bot is a member of and the
+// bot's own IMs, not-joined holds the rest.
 func (c *SlackClient) RoomList(ctx context.Context, _ apronws.RoomListParams) (apronws.RoomListResult, error) {
 	var joined, notJoined []apronws.Room
 	cursor := ""

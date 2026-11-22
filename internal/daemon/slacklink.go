@@ -196,7 +196,10 @@ func (l *slackLink) History(ctx context.Context, roomID string, after int64, lim
 	return out, nil
 }
 
-// Rooms lists every conversation the bot is in, following cursors.
+// Rooms lists every unarchived conversation the bot is in, following
+// cursors — the same listing the CLI's send path resolves rooms from,
+// so receive and send agree on which rooms exist. Archived channels
+// cannot receive posts, so catch-up over them would never deliver.
 func (l *slackLink) Rooms(ctx context.Context) ([]RoomRef, error) {
 	// Known limitation: under a bot token conversations.list returns no
 	// MPIMs, so this listing (and reconnect catch-up over it) misses
@@ -206,7 +209,7 @@ func (l *slackLink) Rooms(ctx context.Context) ([]RoomRef, error) {
 	var out []RoomRef
 	cursor := ""
 	for {
-		res, err := l.api.ConversationsList(ctx, slack.ListParams{Types: types, Cursor: cursor, Limit: 200})
+		res, err := l.api.ConversationsList(ctx, slack.ListParams{Types: types, Cursor: cursor, Limit: 200, ExcludeArchived: true})
 		if err != nil {
 			return nil, err
 		}
