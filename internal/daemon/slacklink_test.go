@@ -3,10 +3,10 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"fmt"
 	"testing"
 
 	"github.com/sdougbrown/whinny/internal/slack"
