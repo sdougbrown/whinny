@@ -96,6 +96,33 @@ func TestDecodeMessageEditedMarker(t *testing.T) {
 	}
 }
 
+func TestDecodeMessageTopLevelThreadTS(t *testing.T) {
+	// Slack sets thread_ts == ts on thread-root messages; the decoded
+	// ReplyTo must be empty so a self-post does not arm a
+	// self-anchored subscription.
+	m, err := DecodeMessage(mustJSON(t, map[string]any{
+		"type": "message", "channel": "C1", "user": "U1", "text": "hi",
+		"ts": "1.1", "thread_ts": "1.1",
+	}))
+	if err != nil {
+		t.Fatalf("DecodeMessage: %v", err)
+	}
+	if m.ReplyTo != "" {
+		t.Errorf("ReplyTo = %q, want empty for a top-level message", m.ReplyTo)
+	}
+	// A genuine thread reply keeps the parent ts.
+	m2, err := DecodeMessage(mustJSON(t, map[string]any{
+		"type": "message", "channel": "C1", "user": "U1", "text": "reply",
+		"ts": "1.2", "thread_ts": "1.1",
+	}))
+	if err != nil {
+		t.Fatalf("DecodeMessage: %v", err)
+	}
+	if m2.ReplyTo != "1.1" {
+		t.Errorf("ReplyTo = %q, want the parent ts 1.1", m2.ReplyTo)
+	}
+}
+
 func TestDecodeMessageInvalid(t *testing.T) {
 	if _, err := DecodeMessage(json.RawMessage(`{`)); err == nil {
 		t.Fatal("DecodeMessage: want error for invalid JSON")

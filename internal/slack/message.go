@@ -87,15 +87,22 @@ func DecodeMessage(payload json.RawMessage) (Msg, error) {
 	}
 }
 
-// decodeWire maps one wire message to Msg.
+// decodeWire maps one wire message to Msg. Slack sets thread_ts == ts
+// on thread-root (top-level) messages, so a non-empty thread_ts that
+// equals the message's own ts is not a reply: only genuine thread
+// replies carry a different thread_ts.
 func decodeWire(w wireMessage) Msg {
+	replyTo := w.ThreadTS
+	if replyTo == w.TS {
+		replyTo = ""
+	}
 	return Msg{
 		RoomID:     w.Channel,
 		MessageID:  w.TS,
 		FromUserID: w.User,
 		BotID:      w.BotID,
 		Text:       w.Text,
-		ReplyTo:    w.ThreadTS,
+		ReplyTo:    replyTo,
 		Subtype:    w.Subtype,
 	}
 }
