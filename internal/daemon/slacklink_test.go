@@ -327,4 +327,14 @@ func TestSlackEventImageURL(t *testing.T) {
 	if ev3.ImageURL != "" {
 		t.Errorf("image url = %q, want empty (no image file)", ev3.ImageURL)
 	}
+	// An off-slack.com attachment image_url is not selected: the
+	// fetcher would refuse it, so selection and fetch agree.
+	ev4, ok := l.slackEvent(slackws.Event{Type: "message", Payload: json.RawMessage(
+		`{"type":"message","channel":"C1","user":"U1","text":"unfurl","ts":"1700000000.000530","attachments":[{"image_url":"https://cdn.example.com/pic.png"}]}`)})
+	if !ok {
+		t.Fatal("message event dropped")
+	}
+	if ev4.ImageURL != "" {
+		t.Errorf("image url = %q, want empty (off-slack.com host)", ev4.ImageURL)
+	}
 }

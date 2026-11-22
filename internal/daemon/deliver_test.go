@@ -85,7 +85,8 @@ func TestFeedDelivererFetchesImage(t *testing.T) {
 
 	var buf bytes.Buffer
 	u, _ := url.Parse(imgSrv.URL)
-	d := &feedDeliverer{out: &buf, originScheme: u.Scheme, originHost: u.Host}
+	apron := newApronFetcher(u.Scheme, u.Host)
+	d := &feedDeliverer{out: &buf, fetch: apron}
 	t.Cleanup(d.cleanup)
 	env := Envelope{Text: "with image", From: "u1", ImageURL: imgSrv.URL}
 	if err := d.Deliver(context.Background(), "agent", env); err != nil {
@@ -119,7 +120,8 @@ func TestFeedDelivererImageTooLarge(t *testing.T) {
 
 	var buf bytes.Buffer
 	u, _ := url.Parse(imgSrv.URL)
-	d := &feedDeliverer{out: &buf, originScheme: u.Scheme, originHost: u.Host}
+	apron := newApronFetcher(u.Scheme, u.Host)
+	d := &feedDeliverer{out: &buf, fetch: apron}
 	t.Cleanup(d.cleanup)
 	env := Envelope{Text: "big", From: "u1", ImageURL: imgSrv.URL}
 	if err := d.Deliver(context.Background(), "agent", env); err != nil {
@@ -183,7 +185,8 @@ func TestFeedDelivererRefusesCrossOrigin(t *testing.T) {
 	ou, _ := url.Parse(originSrv.URL)
 
 	var buf bytes.Buffer
-	d := &feedDeliverer{out: &buf, originScheme: ou.Scheme, originHost: ou.Host}
+	apron := newApronFetcher(ou.Scheme, ou.Host)
+	d := &feedDeliverer{out: &buf, fetch: apron}
 	t.Cleanup(d.cleanup)
 	env := Envelope{Text: "x", From: "u1", ImageURL: otherSrv.URL}
 	if err := d.Deliver(context.Background(), "agent", env); err != nil {
@@ -217,7 +220,8 @@ func TestFeedDelivererRefusesCrossOriginRedirect(t *testing.T) {
 	ou, _ := url.Parse(originSrv.URL)
 
 	var buf bytes.Buffer
-	d := &feedDeliverer{out: &buf, originScheme: ou.Scheme, originHost: ou.Host}
+	apron := newApronFetcher(ou.Scheme, ou.Host)
+	d := &feedDeliverer{out: &buf, fetch: apron}
 	t.Cleanup(d.cleanup)
 	env := Envelope{Text: "x", From: "u1", ImageURL: originSrv.URL}
 	if err := d.Deliver(context.Background(), "agent", env); err != nil {
@@ -248,7 +252,8 @@ func TestFeedDelivererFollowsSameOriginRedirect(t *testing.T) {
 	u, _ := url.Parse(srv.URL)
 
 	var buf bytes.Buffer
-	d := &feedDeliverer{out: &buf, originScheme: u.Scheme, originHost: u.Host}
+	apron := newApronFetcher(u.Scheme, u.Host)
+	d := &feedDeliverer{out: &buf, fetch: apron}
 	t.Cleanup(d.cleanup)
 	env := Envelope{Text: "x", From: "u1", ImageURL: srv.URL + "/redirect"}
 	if err := d.Deliver(context.Background(), "agent", env); err != nil {
@@ -273,7 +278,8 @@ func TestFeedDelivererTempDirCap(t *testing.T) {
 	u, _ := url.Parse(srv.URL)
 
 	var buf bytes.Buffer
-	d := &feedDeliverer{out: &buf, originScheme: u.Scheme, originHost: u.Host}
+	apron := newApronFetcher(u.Scheme, u.Host)
+	d := &feedDeliverer{out: &buf, fetch: apron}
 	t.Cleanup(d.cleanup)
 	for i := 0; i < maxImageFiles+5; i++ {
 		env := Envelope{Text: "x", From: "u1", ImageURL: srv.URL}

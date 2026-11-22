@@ -3,6 +3,7 @@ package slack
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 )
@@ -139,7 +140,9 @@ func decodeWire(w wireMessage) Msg {
 
 // imageURL picks the first image attachment's fetch URL: a file with an
 // image/ mimetype (its url_private), else an attachment with an
-// image_url.
+// image_url hosted on a slack.com host. The host restriction mirrors
+// the daemon's slack fetcher allow-list (slack.HostAllowed): selecting
+// an off-host URL would advertise an embed the fetcher refuses.
 func imageURL(files []wireFile, attachments []wireAttachment) string {
 	for _, f := range files {
 		if strings.HasPrefix(f.MimeType, "image/") && f.URLPrivate != "" {
@@ -147,11 +150,22 @@ func imageURL(files []wireFile, attachments []wireAttachment) string {
 		}
 	}
 	for _, a := range attachments {
-		if a.ImageURL != "" {
+		if a.ImageURL != "" && hostAllowed(a.ImageURL) {
 			return a.ImageURL
 		}
 	}
 	return ""
+}
+
+// hostAllowed reports whether rawURL's host (with optional port) is a
+// slack.com host — the same allow-list the daemon's image fetcher
+// enforces, shared so selection and fetch cannot disagree.
+func hostAllowed(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return HostAllowed(u.Host)
 }
 
 // mentionRe matches a Slack user mention token, <@USERID>.
@@ -183,4 +197,16 @@ func AuthorID(fromUserID, botID, selfUserID, selfBotID string) string {
 		return selfUserID
 	}
 	return "bot:" + botID
+}
+
+// HostAllowed reports whether host (with optional port) is a slack.com
+// host: exactly slack.com or any subdomain. It is the allow-list both
+// the image selection and the daemon's bearer-authenticated fetcher
+// enforce.
+func HostAllowed(host string) bool {
+	if i := strings.IndexByte(host, ':'); i >= 0 {
+		host = host[:i]
+	}
+	host = strings.ToLower(host)
+	return host == "slack.com" || strings.HasSuffix(host, ".slack.com")
 }

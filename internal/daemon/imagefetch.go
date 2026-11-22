@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+
+	"github.com/sdougbrown/whinny/internal/slack"
 	"strings"
 )
 
@@ -64,13 +66,13 @@ type slackFetcher struct {
 	client *http.Client
 	token  string
 	// hostAllowed is the origin allow-list (the URL host, port
-	// included); production is slackHostAllowed.
+	// included); production is slack.HostAllowed.
 	hostAllowed func(host string) bool
 }
 
 // newSlackFetcher builds the Slack fetcher for the bot token.
 func newSlackFetcher(token string) *slackFetcher {
-	f := &slackFetcher{token: token, hostAllowed: slackHostAllowed}
+	f := &slackFetcher{token: token, hostAllowed: slack.HostAllowed}
 	f.client = &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if !f.hostAllowed(req.URL.Host) {

@@ -45,7 +45,7 @@ func NewDeliverer(cfg Config, stdout io.Writer) (Deliverer, func(), error) {
 		} else {
 			fetch = newApronFetcher(originScheme, originHost)
 		}
-		f := &feedDeliverer{out: stdout, fetch: fetch, originScheme: originScheme, originHost: originHost}
+		f := &feedDeliverer{out: stdout, fetch: fetch}
 		return f, func() { f.cleanup() }, nil
 	default:
 		return nil, nil, fmt.Errorf("daemon: unknown deliver backend %q", cfg.Deliver)
@@ -134,15 +134,10 @@ type feedDeliverer struct {
 	out     io.Writer
 	outMu   sync.Mutex // guards out: queue flushes are concurrent
 	fetch   imageFetcher
-	fetchMu sync.Mutex
 	dir     string
 	dirMu   sync.Mutex
-	// originScheme/originHost build the fallback apron fetcher when no
-	// fetcher was injected (tests build the deliverer without one).
-	originScheme string
-	originHost   string
-	filesMu      sync.Mutex
-	files        []string // FIFO order of written files
+	filesMu sync.Mutex
+	files   []string // FIFO order of written files
 }
 
 // maxImageFiles caps the image temp directory; the oldest file is
@@ -168,17 +163,6 @@ func apronOrigin(u string) (string, string, error) {
 		scheme = "https"
 	}
 	return scheme, p.Host, nil
-}
-
-// getFetcher returns the image fetcher, falling back to an apron
-// fetcher built from the configured origin when none was injected.
-func (d *feedDeliverer) getFetcher() imageFetcher {
-	d.fetchMu.Lock()
-	defer d.fetchMu.Unlock()
-	if d.fetch == nil {
-		d.fetch = newApronFetcher(d.originScheme, d.originHost)
-	}
-	return d.fetch
 }
 
 // getDir returns the image temp directory, creating it on first use.
@@ -222,7 +206,7 @@ func (d *feedDeliverer) Deliver(ctx context.Context, _ string, env Envelope) err
 func (d *feedDeliverer) fetchImage(ctx context.Context, rawURL string) (*FeedImage, error) {
 	fetchCtx, cancel := context.WithTimeout(ctx, imageFetchTimeout)
 	defer cancel()
-	body, media, err := d.getFetcher().Fetch(fetchCtx, rawURL)
+	body, media, err := d.fetch.Fetch(fetchCtx, rawURL)
 	if err != nil {
 		return nil, err
 	}
