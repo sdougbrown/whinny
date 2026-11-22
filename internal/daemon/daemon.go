@@ -113,6 +113,9 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 	if deps.Link != nil && deps.Client != nil {
 		return fmt.Errorf("daemon: Deps sets both Link and Client; set exactly one")
 	}
+	if deps.Client != nil && cfg.Transport == TransportSlack {
+		return fmt.Errorf("daemon: Deps sets Client with the slack transport; an injected apron client is unusable — set Link or drop Client")
+	}
 	now := deps.Now
 	if now == nil {
 		now = time.Now
@@ -151,6 +154,7 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 	case deps.Link != nil:
 		d.link = deps.Link
 	case cfg.Transport == TransportSlack:
+		log.Printf("DBG: slack branch entered")
 		apiOpts := []slack.ClientOption{}
 		if deps.SlackBaseURL != "" {
 			apiOpts = append(apiOpts, slack.WithBaseURL(deps.SlackBaseURL))
@@ -173,11 +177,19 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 		}
 		if cfg.Self.UserID == "" {
 			cfg.Self.UserID = link.SelfUserID()
+		} else if cfg.Self.UserID != link.SelfUserID() {
+			// A stale configured id silently bypasses the self-post
+			// firebreak (senders are attributed by the resolved ids),
+			// so the resolved id wins and the mismatch is loud.
+			log.Printf("daemon: configured self.user_id %q does not match the Slack identity %q; using %q",
+				cfg.Self.UserID, link.SelfUserID(), link.SelfUserID())
+			cfg.Self.UserID = link.SelfUserID()
 		}
 		// The daemon struct holds its own copy of cfg (built before the
 		// transport switch); carry the resolved id through so the policy
 		// reads it.
 		d.cfg.Self.UserID = cfg.Self.UserID
+		log.Printf("DBG identify done self=%q", cfg.Self.UserID)
 		d.link = link
 		log.Printf("daemon: connected to slack as %s", link.SelfUserID())
 	default:
