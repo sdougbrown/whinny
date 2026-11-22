@@ -52,6 +52,12 @@ type Deps struct {
 	// Wait is the pause between history-lookup retries. Nil falls back
 	// to time.Sleep.
 	Wait func(time.Duration)
+	// SlackBaseURL, if set, overrides the Slack Web API base URL (tests
+	// point it at a fake server). Empty uses the real API.
+	SlackBaseURL string
+	// SlackWSBaseURL, if set, overrides the Slack Socket Mode API base
+	// URL (tests point it at a fake server). Empty uses the real API.
+	SlackWSBaseURL string
 }
 
 // daemon is the run-loop state: one connected link, one store, one
@@ -138,8 +144,16 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 	case deps.Link != nil:
 		d.link = deps.Link
 	case cfg.Transport == TransportSlack:
-		api := slack.NewClient(cfg.BotToken)
-		ws, err := slackws.Connect(ctx, slackws.Options{AppToken: cfg.AppToken, OnReconnect: catchUp})
+		apiOpts := []slack.ClientOption{}
+		if deps.SlackBaseURL != "" {
+			apiOpts = append(apiOpts, slack.WithBaseURL(deps.SlackBaseURL))
+		}
+		api := slack.NewClient(cfg.BotToken, apiOpts...)
+		wsOpts := slackws.Options{AppToken: cfg.AppToken, OnReconnect: catchUp}
+		if deps.SlackWSBaseURL != "" {
+			wsOpts.BaseURL = deps.SlackWSBaseURL
+		}
+		ws, err := slackws.Connect(ctx, wsOpts)
 		if err != nil {
 			return err
 		}
@@ -153,6 +167,10 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 		if cfg.Self.UserID == "" {
 			cfg.Self.UserID = link.SelfUserID()
 		}
+		// The daemon struct holds its own copy of cfg (built before the
+		// transport switch); carry the resolved id through so the policy
+		// reads it.
+		d.cfg.Self.UserID = cfg.Self.UserID
 		d.link = link
 		log.Printf("daemon: connected to slack as %s", link.SelfUserID())
 	default:
