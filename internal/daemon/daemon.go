@@ -80,7 +80,7 @@ type daemon struct {
 	// across the dedupe check, evaluation, and enqueue; delivery (the
 	// queue flush and shared callbacks) runs after the lock is released
 	// so a slow deliverer cannot stall live processing or catch-up.
-	// Deliver must not re-enter handleRecord.
+	// Deliver must not re-enter handleEvent.
 	procMu sync.Mutex
 }
 
@@ -432,7 +432,7 @@ func (d *daemon) handleResidentLocked(ctx context.Context, m wake.Msg, imageURL 
 		Peers:   d.cfg.Peers,
 		Watches: resident,
 		// The author was pre-resolved outside procMu (see
-		// handleRecord); this lookup returns that value without
+		// handleEvent); this lookup returns that value without
 		// touching the network.
 		History: func(ctx context.Context, messageID string) (string, bool, error) {
 			return author, authorOK, authorErr
@@ -488,7 +488,7 @@ func (d *daemon) flushQueue(ctx context.Context) error {
 // lookupAuthor resolves the reply target's author, making up to
 // maxAttempts History calls (1 initial + 3 retries, a 1-second pause
 // between attempts, each attempt bounded by a 5-second timeout). It is
-// a network call and runs outside procMu (see handleRecord): holding
+// a network call and runs outside procMu (see handleEvent): holding
 // the lock across the retry would stall the live loop and catch-up.
 // The room cursor advances
 // after the lookup (regardless of its outcome), so catch-up will not
