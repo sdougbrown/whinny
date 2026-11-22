@@ -149,7 +149,7 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 			apiOpts = append(apiOpts, slack.WithBaseURL(deps.SlackBaseURL))
 		}
 		api := slack.NewClient(cfg.BotToken, apiOpts...)
-		wsOpts := slackws.Options{AppToken: cfg.AppToken, OnReconnect: catchUp}
+		wsOpts := slackws.Options{AppToken: cfg.AppToken}
 		if deps.SlackWSBaseURL != "" {
 			wsOpts.BaseURL = deps.SlackWSBaseURL
 		}

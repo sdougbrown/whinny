@@ -117,6 +117,16 @@ func (c *Client) Records() <-chan Event {
 	return c.records
 }
 
+// SetOnReconnect sets (or clears) the reconnect hook. It is safe to call
+// after Connect: the hook is read under the same lock the run loop uses,
+// so a hook set after the initial connect is picked up by the next
+// reconnect without racing the read loop.
+func (c *Client) SetOnReconnect(fn func()) {
+	c.mu.Lock()
+	c.onReconnect = fn
+	c.mu.Unlock()
+}
+
 // Close stops the client: it stops reconnecting and closes the
 // connection. It is idempotent.
 func (c *Client) Close() {

@@ -50,6 +50,13 @@ func (l *slackLink) SelfUserID() string { return l.selfUserID }
 // BotID returns the bot id resolved by Identify.
 func (l *slackLink) BotID() string { return l.botID }
 
+// SetOnReconnect forwards the reconnect hook to the underlying Socket
+// Mode client (the daemon's catch-up wiring). It satisfies the optional
+// hook the Run loop looks for on any Link, and is called after the
+// daemon's link and history cache are set, so the hook never runs
+// against a nil dependency.
+func (l *slackLink) SetOnReconnect(fn func()) { l.ws.SetOnReconnect(fn) }
+
 // Events pumps Socket Mode events, keeping message and app_mention
 // events.
 func (l *slackLink) Events(ctx context.Context) (<-chan LinkEvent, error) {
