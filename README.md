@@ -205,6 +205,9 @@ default 20).
 - Slack "reply to my message" wakes only when the bot's post is the
   thread root: `ReplyTo` carries the `thread_ts` (thread root), so replies
   to the bot's non-root thread posts don't wake.
+- Slack delete tombstones carry no author, so the reply-author cache
+  cannot resolve a deleted message's author on Slack (apron's tombstones
+  do feed it).
 - Feed image fetch is same-origin restricted and capped.
 - Delivery runs synchronously in the record loop: a slow deliverer can
   backpressure the connection.

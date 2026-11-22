@@ -192,7 +192,11 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 	d.hist = newHistoryCache(d.link)
 	// A delete tombstone carries no body to evaluate, but its author is
 	// recorded so a later reply to the deleted message resolves; the
-	// adapter forwards tombstones to this callback.
+	// adapter forwards tombstones to this callback. Slack's
+	// message_deleted events carry no author, so the Slack link never
+	// implements this hook: deleted-message authors are unresolvable
+	// on Slack (a Slack-specific limitation; apron's tombstones do
+	// feed the cache).
 	if f, ok := d.link.(interface {
 		SetTombstoneFeed(func(string, string, string))
 	}); ok {
