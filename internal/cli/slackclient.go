@@ -61,33 +61,22 @@ func (c *SlackClient) PostMessage(ctx context.Context, p apronws.PostParams) (ap
 // the result: joined holds channels the bot is a member of and the
 // bot's own IMs, not-joined holds the rest.
 func (c *SlackClient) RoomList(ctx context.Context, _ apronws.RoomListParams) (apronws.RoomListResult, error) {
+	// The shared listing keeps receive and send agreeing on which
+	// rooms exist. IMs count as joined: the bot is by definition in
+	// its own IMs.
+	channels, err := c.api.ConversationsListAll(ctx,
+		[]string{"public_channel", "private_channel", "mpim", "im"})
+	if err != nil {
+		return apronws.RoomListResult{}, err
+	}
 	var joined, notJoined []apronws.Room
-	cursor := ""
-	for {
-		// Same type set as the daemon's slackLink.Rooms, so receive
-		// and send agree on which rooms exist. IMs count as joined:
-		// the bot is by definition in its own IMs.
-		res, err := c.api.ConversationsList(ctx, slack.ListParams{
-			Types:           []string{"public_channel", "private_channel", "mpim", "im"},
-			Cursor:          cursor,
-			Limit:           200,
-			ExcludeArchived: true,
-		})
-		if err != nil {
-			return apronws.RoomListResult{}, err
+	for _, ch := range channels {
+		room := apronws.Room{ID: ch.ID, Title: ch.Name}
+		if ch.IsMember || ch.IsIM {
+			joined = append(joined, room)
+		} else {
+			notJoined = append(notJoined, room)
 		}
-		for _, ch := range res.Channels {
-			room := apronws.Room{ID: ch.ID, Title: ch.Name}
-			if ch.IsMember || ch.IsIM {
-				joined = append(joined, room)
-			} else {
-				notJoined = append(notJoined, room)
-			}
-		}
-		if res.NextCursor == "" {
-			break
-		}
-		cursor = res.NextCursor
 	}
 	return apronws.RoomListResult{Joined: joined, NotJoined: notJoined}, nil
 }

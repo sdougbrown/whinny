@@ -204,21 +204,19 @@ func (l *slackLink) Rooms(ctx context.Context) ([]RoomRef, error) {
 	// Known limitation: under a bot token conversations.list returns no
 	// MPIMs, so this listing (and reconnect catch-up over it) misses
 	// them — but live message.mpim events still wake. Documented in the
-	// README's known-gaps list.
-	types := []string{"public_channel", "private_channel", "mpim", "im"}
-	var out []RoomRef
-	cursor := ""
-	for {
-		res, err := l.api.ConversationsList(ctx, slack.ListParams{Types: types, Cursor: cursor, Limit: 200, ExcludeArchived: true})
-		if err != nil {
-			return nil, err
-		}
-		for _, ch := range res.Channels {
-			out = append(out, RoomRef{ID: ch.ID, Title: ch.Name})
-		}
-		if res.NextCursor == "" {
-			return out, nil
-		}
-		cursor = res.NextCursor
+	// README's known-gaps list. Channels archived mid-disconnect are a
+	// second accepted gap: catch-up lists unarchived rooms only (shared
+	// with the CLI's send-path resolution), so a message posted before
+	// the archive is not replayed; the live path delivers regardless of
+	// archive status.
+	channels, err := l.api.ConversationsListAll(ctx,
+		[]string{"public_channel", "private_channel", "mpim", "im"})
+	if err != nil {
+		return nil, err
 	}
+	out := make([]RoomRef, 0, len(channels))
+	for _, ch := range channels {
+		out = append(out, RoomRef{ID: ch.ID, Title: ch.Name})
+	}
+	return out, nil
 }
