@@ -3,8 +3,6 @@ package daemon
 import (
 	"context"
 	"sync"
-
-	"github.com/sdougbrown/whinny/internal/apronws"
 )
 
 // maxSeen bounds the record-stream author cache: the most recent 1024
@@ -12,19 +10,19 @@ import (
 // exceeded.
 const maxSeen = 1024
 
-// historyCache resolves reply-target authors, preferring the record
-// stream (fed by handleRecord as messages stream past) and falling back
-// to the client's History only on a miss. A miss is cached as
+// historyCache resolves reply-target authors, preferring the event
+// stream (fed by processEvent as messages stream past) and falling back
+// to the link's History only on a miss. A miss is cached as
 // not-found, so a reply storm costs one lookup. It satisfies
 // wake.HistoryLookup.
 //
 // The cache is keyed by message id (unique across rooms, so it is
 // effectively room-scoped); each entry also records the room.
 type historyCache struct {
-	client *apronws.Client
-	mu     sync.Mutex
-	seen   map[string]histEntry
-	order  []string // FIFO order for eviction
+	link  Link
+	mu    sync.Mutex
+	seen  map[string]histEntry
+	order []string // FIFO order for eviction
 }
 
 type histEntry struct {
@@ -33,8 +31,8 @@ type histEntry struct {
 	ok     bool
 }
 
-func newHistoryCache(client *apronws.Client) *historyCache {
-	return &historyCache{client: client, seen: make(map[string]histEntry)}
+func newHistoryCache(link Link) *historyCache {
+	return &historyCache{link: link, seen: make(map[string]histEntry)}
 }
 
 // feed records the author of a message as it streams past, so a later
@@ -57,8 +55,8 @@ func (h *historyCache) feed(messageID, roomID, author string) {
 }
 
 // lookup returns the author of messageID in roomID, preferring the
-// record-stream cache and falling back to the client's History (scoped
-// to the room) on a miss. ok is false when neither the cache nor the
+// event-stream cache and falling back to the link's History (scoped to
+// the room) on a miss. ok is false when neither the cache nor the
 // room's fetched window contains it.
 func (h *historyCache) lookup(ctx context.Context, roomID, messageID string) (string, bool, error) {
 	h.mu.Lock()
@@ -67,14 +65,15 @@ func (h *historyCache) lookup(ctx context.Context, roomID, messageID string) (st
 		return e.author, e.ok, nil
 	}
 	h.mu.Unlock()
-	res, err := h.client.History(ctx, apronws.HistoryParams{RoomID: roomID, Limit: HistoryLookupLimit})
+	events, err := h.link.History(ctx, roomID, 0, HistoryLookupLimit)
 	if err != nil {
 		// An error is not cached: the next reply gets a fresh chance.
 		return "", false, err
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for _, m := range res.Messages {
+	for _, ev := range events {
+		m := ev.Msg
 		if _, seen := h.seen[m.MessageID]; !seen {
 			h.order = append(h.order, m.MessageID)
 		}
