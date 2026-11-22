@@ -117,6 +117,39 @@ func TestSlackEventAppMention(t *testing.T) {
 	}
 }
 
+// TestSlackMessageMentionParsed: a plain message carrying a <@USERID>
+// token has the mention parsed into Mentions (so the message event wins
+// the dedupe race against its app_mention without losing the mention),
+// and the parsed mention wakes.
+func TestSlackMessageMentionParsed(t *testing.T) {
+	l := &slackLink{selfUserID: "U9", botID: "B1"}
+	ev, ok := l.slackEvent(slackws.Event{Type: "message", Payload: json.RawMessage(
+		`{"type":"message","channel":"C1","user":"U1","text":"<@U9> look at this and <@U1> too","ts":"1700000000.000400"}`)})
+	if !ok {
+		t.Fatal("message event dropped")
+	}
+	if len(ev.Msg.Mentions) != 2 || ev.Msg.Mentions[0] != "U9" || ev.Msg.Mentions[1] != "U1" {
+		t.Errorf("mentions = %v, want [U9 U1]", ev.Msg.Mentions)
+	}
+	// The parsed mention wakes: mentioned() matches the self user id.
+	dec := wake.Evaluate(context.Background(), wake.In{
+		Msg:  ev.Msg,
+		Self: wake.Self{UserID: "U9"},
+	})
+	if !dec.Wake || dec.Kind != wake.KindMention {
+		t.Errorf("decision = %+v; want a mention wake", dec)
+	}
+	// A message with no mention token has no Mentions.
+	ev2, ok := l.slackEvent(slackws.Event{Type: "message", Payload: json.RawMessage(
+		`{"type":"message","channel":"C1","user":"U1","text":"plain text","ts":"1700000000.000410"}`)})
+	if !ok {
+		t.Fatal("message event dropped")
+	}
+	if len(ev2.Msg.Mentions) != 0 {
+		t.Errorf("mentions = %v, want none", ev2.Msg.Mentions)
+	}
+}
+
 func TestSlackEventSkipsDeletesAndUnknown(t *testing.T) {
 	l := &slackLink{selfUserID: "U9"}
 	if _, ok := l.slackEvent(slackws.Event{Type: "message", Payload: json.RawMessage(
