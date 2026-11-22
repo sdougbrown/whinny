@@ -15,6 +15,7 @@ import (
 	"github.com/sdougbrown/cli-contract"
 	"github.com/sdougbrown/cli-contract/registry"
 	"github.com/sdougbrown/whinny/internal/daemon"
+	"github.com/sdougbrown/whinny/internal/slack"
 	"github.com/sdougbrown/whinny/internal/store"
 )
 
@@ -61,23 +62,37 @@ func (d Deps) now() time.Time {
 }
 
 // connect returns the room client the handler uses and whether the
-// handler owns it (and must Close it).
+// handler owns it (and must Close it). The transport resolves from
+// $WHINNY_TRANSPORT (default apron): the slack transport builds a
+// SlackClient over the Web API from $SLACK_BOT_TOKEN and never demands
+// apron credentials; the apron transport keeps the existing dial.
 func (d Deps) connect(ctx context.Context, inv clicontract.Invocation) (RoomClient, bool, error) {
 	if d.Client != nil {
 		return d.Client, false, nil
 	}
-	cfg, err := ResolveConfig(inv.Flags["url"], inv.Flags["token"], d.env())
-	if err != nil {
-		return nil, false, err
+	switch d.env()("WHINNY_TRANSPORT") {
+	case "", "apron":
+		cfg, err := ResolveConfig(inv.Flags["url"], inv.Flags["token"], d.env())
+		if err != nil {
+			return nil, false, err
+		}
+		if d.Connect == nil {
+			return nil, false, OperationalErrorf("no apron connection available")
+		}
+		c, err := d.Connect(ctx, cfg)
+		if err != nil {
+			return nil, false, OperationalErrorf("connect to %s: %v", cfg.URL, err)
+		}
+		return c, true, nil
+	case "slack":
+		token := d.env()("SLACK_BOT_TOKEN")
+		if token == "" {
+			return nil, false, UsageErrorf("slack transport: set SLACK_BOT_TOKEN")
+		}
+		return NewSlackClient(slack.NewClient(token)), true, nil
+	default:
+		return nil, false, UsageErrorf("unknown WHINNY_TRANSPORT %q (want apron or slack)", d.env()("WHINNY_TRANSPORT"))
 	}
-	if d.Connect == nil {
-		return nil, false, OperationalErrorf("no apron connection available")
-	}
-	c, err := d.Connect(ctx, cfg)
-	if err != nil {
-		return nil, false, OperationalErrorf("connect to %s: %v", cfg.URL, err)
-	}
-	return c, true, nil
 }
 
 // storeOwned returns the state store the handler uses and whether the

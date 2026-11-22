@@ -118,6 +118,8 @@ type ListParams struct {
 	Types  []string
 	Cursor string
 	Limit  int
+	// ExcludeArchived drops archived channels from the result.
+	ExcludeArchived bool
 }
 
 // Channel is one room from conversations.list.
@@ -125,6 +127,8 @@ type Channel struct {
 	ID   string
 	Name string
 	IsIM bool
+	// IsMember is the channel object's is_member: the bot is a member.
+	IsMember bool
 }
 
 // ListResult is the conversations.list result.
@@ -145,6 +149,9 @@ func (c *Client) ConversationsList(ctx context.Context, p ListParams) (ListResul
 	if p.Limit > 0 {
 		params["limit"] = p.Limit
 	}
+	if p.ExcludeArchived {
+		params["exclude_archived"] = true
+	}
 	var out struct {
 		Channels []struct {
 			ID        string `json:"id"`
@@ -152,6 +159,7 @@ func (c *Client) ConversationsList(ctx context.Context, p ListParams) (ListResul
 			IsIM      bool   `json:"is_im"`
 			IsChannel bool   `json:"is_channel"`
 			IsGroup   bool   `json:"is_group"`
+			IsMember  bool   `json:"is_member"`
 		} `json:"channels"`
 		ResponseMetadata struct {
 			NextCursor string `json:"next_cursor"`
@@ -162,7 +170,7 @@ func (c *Client) ConversationsList(ctx context.Context, p ListParams) (ListResul
 	}
 	res := ListResult{NextCursor: out.ResponseMetadata.NextCursor}
 	for _, ch := range out.Channels {
-		res.Channels = append(res.Channels, Channel{ID: ch.ID, Name: ch.Name, IsIM: ch.IsIM})
+		res.Channels = append(res.Channels, Channel{ID: ch.ID, Name: ch.Name, IsIM: ch.IsIM, IsMember: ch.IsMember})
 	}
 	return res, nil
 }
