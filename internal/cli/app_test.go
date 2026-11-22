@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -76,5 +77,57 @@ func TestManifest(t *testing.T) {
 		if _, ok := tools[name]; !ok {
 			t.Fatalf("tools missing %q", name)
 		}
+	}
+}
+
+// envDeps builds Deps over a fixed environment (no apron or slack
+// credentials unless the map names them).
+func envDeps(vals map[string]string) Deps {
+	return Deps{Env: func(k string) string { return vals[k] }}
+}
+
+// TestConnectSlackMissingToken: the slack transport without a bot token
+// is a usage error, before any apron credential is demanded.
+func TestConnectSlackMissingToken(t *testing.T) {
+	d := envDeps(map[string]string{"WHINNY_TRANSPORT": "slack"})
+	_, _, err := d.connect(context.Background(), clicontract.Invocation{})
+	if err == nil {
+		t.Fatalf("connect: want a missing token error, got nil")
+	}
+	if e, ok := err.(*Error); !ok || e.Class != ClassUsage {
+		t.Fatalf("err = %v, want a usage-class error", err)
+	}
+}
+
+// TestConnectSlackWithoutApronCreds: the slack transport with a bot
+// token connects without apron credentials (no url, no token).
+func TestConnectSlackWithoutApronCreds(t *testing.T) {
+	d := envDeps(map[string]string{
+		"WHINNY_TRANSPORT": "slack",
+		"SLACK_BOT_TOKEN":  "xoxb-test",
+	})
+	c, owned, err := d.connect(context.Background(), clicontract.Invocation{})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if c == nil || !owned {
+		t.Fatalf("connect = (%v, %v), want an owned client", c, owned)
+	}
+	if _, ok := c.(*SlackClient); !ok {
+		t.Fatalf("client = %T, want *SlackClient", c)
+	}
+	c.Close()
+}
+
+// TestConnectUnknownTransport: a transport value that is neither apron
+// nor slack is a usage error.
+func TestConnectUnknownTransport(t *testing.T) {
+	d := envDeps(map[string]string{"WHINNY_TRANSPORT": "carrier-pigeon"})
+	_, _, err := d.connect(context.Background(), clicontract.Invocation{})
+	if err == nil {
+		t.Fatalf("connect: want an unknown transport error, got nil")
+	}
+	if e, ok := err.(*Error); !ok || e.Class != ClassUsage {
+		t.Fatalf("err = %v, want a usage-class error", err)
 	}
 }
