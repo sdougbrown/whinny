@@ -99,6 +99,11 @@ func (l *slackLink) slackEvent(ev slackws.Event) (LinkEvent, bool) {
 			RoomID: m.RoomID,
 			Msg:    l.wakeMsg(m),
 			Cursor: slack.TSToCursor(m.MessageID),
+			// ImageURL is left empty on Slack: Slack image embeds need
+			// bearer-authenticated fetches the transport-agnostic
+			// deliverer doesn't carry, so Slack watch hits deliver
+			// text-only envelopes (apron fills it; auth-aware fetches
+			// are follow-up work).
 		}, true
 	case "app_mention":
 		var w struct {

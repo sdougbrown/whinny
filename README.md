@@ -208,6 +208,10 @@ default 20).
 - Slack delete tombstones carry no author, so the reply-author cache
   cannot resolve a deleted message's author on Slack (apron's tombstones
   do feed it).
+- Slack watch hits deliver text-only envelopes: Slack image embeds need
+  bearer-authenticated fetches the transport-agnostic deliverer doesn't
+  carry, so `LinkEvent.ImageURL` is left empty on Slack (apron fills it;
+  auth-aware fetches are follow-up work).
 - Feed image fetch is same-origin restricted and capped.
 - Delivery runs synchronously in the record loop: a slow deliverer can
   backpressure the connection.
