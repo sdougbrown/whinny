@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
@@ -106,29 +105,22 @@ func (l *slackLink) slackEvent(ev slackws.Event) (LinkEvent, bool) {
 			// are follow-up work).
 		}, true
 	case "app_mention":
-		var w struct {
-			Channel  string `json:"channel"`
-			User     string `json:"user"`
-			Text     string `json:"text"`
-			TS       string `json:"ts"`
-			ThreadTS string `json:"thread_ts"`
-		}
-		if err := json.Unmarshal(ev.Payload, &w); err != nil {
+		// Decode through the same path as the message branch so both
+		// duplicates of one mention build identical wake.Msg values
+		// (bot attribution, thread-root normalization), then overlay
+		// the mention: an app_mention is by definition directed at
+		// the bot.
+		m, err := slack.DecodeMessage(ev.Payload)
+		if err != nil {
 			return LinkEvent{}, false
 		}
+		msg := l.wakeMsg(m)
+		msg.Mentions = []string{l.selfUserID}
 		return LinkEvent{
 			Kind:   KindMessage,
-			RoomID: w.Channel,
-			Msg: wake.Msg{
-				MessageID: w.TS,
-				RoomID:    w.Channel,
-				From:      wake.From{UserID: w.User},
-				Text:      w.Text,
-				// An app_mention is by definition directed at the bot.
-				Mentions: []string{l.selfUserID},
-				ReplyTo:  w.ThreadTS,
-			},
-			Cursor: slack.TSToCursor(w.TS),
+			RoomID: m.RoomID,
+			Msg:    msg,
+			Cursor: slack.TSToCursor(m.MessageID),
 		}, true
 	default:
 		return LinkEvent{}, false
