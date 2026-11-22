@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 // Msg is the daemon-facing message shape the wake policy and cursor
@@ -31,6 +32,10 @@ type Msg struct {
 	Edited bool
 	// DeletedTS is the deleted message's ts on a message_deleted event.
 	DeletedTS string
+	// ImageURL is the first image attachment's fetch URL (a file's
+	// url_private, else an attachment's image_url); "" when the message
+	// carries no image.
+	ImageURL string
 }
 
 // Message aliases Msg: the wire concept and the daemon-facing shape are
@@ -55,6 +60,23 @@ type wireMessage struct {
 	// DeletedTS is set on a message_deleted event.
 	Message   *wireMessage `json:"message"`
 	DeletedTS string       `json:"deleted_ts"`
+	// Files and Attachments carry the message's image embeds (the
+	// fetch URLs need the bot token's bearer auth).
+	Files       []wireFile       `json:"files"`
+	Attachments []wireAttachment `json:"attachments"`
+}
+
+// wireFile is a file attachment on a message event; url_private is the
+// auth-gated fetch URL (files.slack.com).
+type wireFile struct {
+	MimeType   string `json:"mimetype"`
+	URLPrivate string `json:"url_private"`
+}
+
+// wireAttachment is a block-kit attachment; image_url is the thumbnail
+// URL on image attachments.
+type wireAttachment struct {
+	ImageURL string `json:"image_url"`
 }
 
 // DecodeMessage maps a Slack message event payload to the daemon-facing
@@ -111,7 +133,25 @@ func decodeWire(w wireMessage) Msg {
 		ReplyTo:    replyTo,
 		Subtype:    w.Subtype,
 		Mentions:   ParseMentions(w.Text),
+		ImageURL:   imageURL(w.Files, w.Attachments),
 	}
+}
+
+// imageURL picks the first image attachment's fetch URL: a file with an
+// image/ mimetype (its url_private), else an attachment with an
+// image_url.
+func imageURL(files []wireFile, attachments []wireAttachment) string {
+	for _, f := range files {
+		if strings.HasPrefix(f.MimeType, "image/") && f.URLPrivate != "" {
+			return f.URLPrivate
+		}
+	}
+	for _, a := range attachments {
+		if a.ImageURL != "" {
+			return a.ImageURL
+		}
+	}
+	return ""
 }
 
 // mentionRe matches a Slack user mention token, <@USERID>.

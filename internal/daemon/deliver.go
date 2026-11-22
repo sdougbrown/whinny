@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -38,7 +37,15 @@ func NewDeliverer(cfg Config, stdout io.Writer) (Deliverer, func(), error) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("daemon: derive apron origin: %w", err)
 		}
-		f := &feedDeliverer{out: stdout, originScheme: originScheme, originHost: originHost}
+		// The fetcher is per transport: apron is same-origin only, Slack
+		// is bearer-authenticated and restricted to slack.com hosts.
+		var fetch imageFetcher
+		if cfg.Transport == TransportSlack {
+			fetch = newSlackFetcher(cfg.BotToken)
+		} else {
+			fetch = newApronFetcher(originScheme, originHost)
+		}
+		f := &feedDeliverer{out: stdout, fetch: fetch, originScheme: originScheme, originHost: originHost}
 		return f, func() { f.cleanup() }, nil
 	default:
 		return nil, nil, fmt.Errorf("daemon: unknown deliver backend %q", cfg.Deliver)
@@ -116,18 +123,22 @@ type FeedImage struct {
 // embed bytes are fetched into a per-run temp directory and referenced
 // by path — never base64, never a URL for the consumer to fetch.
 //
-// The image fetch is SSRF-guarded: it is restricted to the apron origin
-// (scheme+host) derived from the configured endpoint, cross-origin and
-// cross-scheme redirects are refused, the fetch is bounded by a 5s
-// timeout, and the temp directory is capped at maxImageFiles files
-// (the oldest is evicted before a new one is written).
+// The image fetch is SSRF-guarded by the transport's fetcher: apron is
+// restricted to the apron origin (scheme+host) derived from the
+// configured endpoint with cross-origin and cross-scheme redirects
+// refused, Slack is restricted to slack.com hosts with the bot token's
+// bearer auth. The fetch is bounded by a 5s timeout, and the temp
+// directory is capped at maxImageFiles files (the oldest is evicted
+// before a new one is written).
 type feedDeliverer struct {
-	out          io.Writer
-	outMu        sync.Mutex // guards out: queue flushes are concurrent
-	client       *http.Client
-	clientMu     sync.Mutex
-	dir          string
-	dirMu        sync.Mutex
+	out     io.Writer
+	outMu   sync.Mutex // guards out: queue flushes are concurrent
+	fetch   imageFetcher
+	fetchMu sync.Mutex
+	dir     string
+	dirMu   sync.Mutex
+	// originScheme/originHost build the fallback apron fetcher when no
+	// fetcher was injected (tests build the deliverer without one).
 	originScheme string
 	originHost   string
 	filesMu      sync.Mutex
@@ -159,23 +170,15 @@ func apronOrigin(u string) (string, string, error) {
 	return scheme, p.Host, nil
 }
 
-// getClient returns the fetch client, creating it (with the SSRF
-// CheckRedirect) on first use.
-func (d *feedDeliverer) getClient() *http.Client {
-	d.clientMu.Lock()
-	defer d.clientMu.Unlock()
-	if d.client == nil {
-		d.client = &http.Client{
-			Timeout: imageFetchTimeout,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if req.URL.Scheme != d.originScheme || req.URL.Host != d.originHost {
-					return errors.New("refusing cross-origin redirect")
-				}
-				return nil
-			},
-		}
+// getFetcher returns the image fetcher, falling back to an apron
+// fetcher built from the configured origin when none was injected.
+func (d *feedDeliverer) getFetcher() imageFetcher {
+	d.fetchMu.Lock()
+	defer d.fetchMu.Unlock()
+	if d.fetch == nil {
+		d.fetch = newApronFetcher(d.originScheme, d.originHost)
 	}
-	return d.client
+	return d.fetch
 }
 
 // getDir returns the image temp directory, creating it on first use.
@@ -211,49 +214,24 @@ func (d *feedDeliverer) Deliver(ctx context.Context, _ string, env Envelope) err
 	return err
 }
 
-// fetchImage fetches url, caps at MaxImageBytes, writes the bytes to the
-// temp directory, and reports the media type: the response's
-// Content-Type when it is image-specific, else a sniff of the first 512
-// bytes (headers lie).
+// fetchImage fetches url through the transport's fetcher (bounded by
+// the 5s timeout at the call site), writes the bytes to the temp
+// directory, and reports the media type: the response's Content-Type
+// when it is image-specific, else a sniff of the first 512 bytes
+// (headers lie).
 func (d *feedDeliverer) fetchImage(ctx context.Context, rawURL string) (*FeedImage, error) {
-	u, err := url.Parse(rawURL)
+	fetchCtx, cancel := context.WithTimeout(ctx, imageFetchTimeout)
+	defer cancel()
+	body, media, err := d.getFetcher().Fetch(fetchCtx, rawURL)
 	if err != nil {
 		return nil, err
 	}
-	if d.originHost == "" || u.Scheme != d.originScheme || u.Host != d.originHost {
-		return nil, fmt.Errorf("refusing cross-origin image fetch %s (want %s://%s)", rawURL, d.originScheme, d.originHost)
+	if media == "" || media == "application/octet-stream" {
+		media = http.DetectContentType(body)
 	}
-	client := d.getClient()
 	dir, err := d.getDir()
 	if err != nil {
 		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxImageBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(body) > MaxImageBytes {
-		return nil, fmt.Errorf("image exceeds %d byte cap", MaxImageBytes)
-	}
-	media := resp.Header.Get("Content-Type")
-	if i := strings.Index(media, ";"); i >= 0 {
-		media = media[:i]
-	}
-	media = strings.TrimSpace(media)
-	if media == "" || media == "application/octet-stream" {
-		media = http.DetectContentType(body)
 	}
 	// Cap the temp directory: evict the oldest file before writing a
 	// new one.

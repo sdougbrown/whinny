@@ -122,7 +122,10 @@ tokens come only from `$SLACK_BOT_TOKEN` (bot, `xoxb-`) and
 `"transport": "slack"` instead of the flag. Live `message.mpim` events
 wake, but MPIM catch-up after downtime does not: `conversations.list`
 under a bot token returns no MPIMs, so MPIMs are missing from the room
-list and history catch-up.
+list and history catch-up. Image embeds deliver: `LinkEvent.ImageURL`
+is the first image file's `url_private` (else an attachment's
+`image_url`), and the feed deliverer fetches it with the bot token's
+bearer auth, restricted to slack.com hosts.
 
 **Delivery backends** (`--deliver`):
 
@@ -210,11 +213,8 @@ default 20).
 - Slack delete tombstones carry no author, so the reply-author cache
   cannot resolve a deleted message's author on Slack (apron's tombstones
   do feed it).
-- Slack watch hits deliver text-only envelopes: Slack image embeds need
-  bearer-authenticated fetches the transport-agnostic deliverer doesn't
-  carry, so `LinkEvent.ImageURL` is left empty on Slack (apron fills it;
-  auth-aware fetches are follow-up work).
-- Feed image fetch is same-origin restricted and capped.
+- Feed image fetch is origin-restricted (apron: same-origin; Slack:
+  slack.com hosts, bearer-authenticated) and capped.
 - Delivery runs synchronously in the record loop: a slow deliverer can
   backpressure the connection.
 
@@ -310,8 +310,8 @@ Room ids in watches and cursors are Slack channel ids; the ambient gate is
 forced off (no quiet mapping yet). "Reply to my message" wakes only when
 the bot's post is the thread root (a reply's `thread_ts` is the thread
 root, so replies to the bot's non-root thread posts don't wake). The CLI
-send path stays apron-only in this phase — the Slack daemon receives and
-delivers, but `whinny post` still targets apron rooms.
+send path targets Slack rooms too (`WHINNY_TRANSPORT=slack`; see "Known
+gaps" for the Slack-side send limits).
 
 ### One-shot and transient agents (shared mode)
 
