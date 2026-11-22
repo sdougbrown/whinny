@@ -95,15 +95,22 @@ func (c *Chain) Evaluate(in GuardInput) (Denial, bool) {
 	return Denial{}, false
 }
 
+// BreakerRefusalText formats the refusal text for a latched breaker:
+// the reason, when set, is carried in parentheses. It is the single
+// formatter for the text: the chain's breaker denial and the post
+// path's trip refusal both build from it, so they can never drift.
+func BreakerRefusalText(reason string) string {
+	if reason == "" {
+		return "latched, do not retry"
+	}
+	return fmt.Sprintf("latched (%s), do not retry", reason)
+}
+
 func checkBreaker(in GuardInput) (Denial, bool) {
 	if !in.BreakerLatched {
 		return Denial{}, false
 	}
-	text := "latched, do not retry"
-	if in.BreakerReason != "" {
-		text = fmt.Sprintf("latched (%s), do not retry", in.BreakerReason)
-	}
-	return Denial{Kind: KindRefusedBreaker, Text: text}, true
+	return Denial{Kind: KindRefusedBreaker, Text: BreakerRefusalText(in.BreakerReason)}, true
 }
 
 // checkRateLimit takes one token: Take is consume-or-deny for both

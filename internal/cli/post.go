@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -56,25 +58,50 @@ func PostHandler(d Deps) clicontract.HandleFunc {
 		if owned {
 			defer st.Close()
 		}
-		bucket, err := d.guard(ctx, st)
+		bucket, denial, err := d.guard(ctx, st)
 		if err != nil {
+			return nil, err
+		}
+		if bucket == nil {
+			// A refused-rate-limit denial is a bad outcome: the agent
+			// saw the typed denial and is retrying anyway. A quiet or
+			// breaker denial is not (operator silence; already latched).
+			if denial.Kind == guard.KindRefusedRateLimit {
+				if reason, tripped := d.tripOnFailure(ctx, st); tripped {
+					return nil, OperationalErrorf("%s: %s", guard.KindRefusedBreaker, guard.BreakerRefusalText(reason))
+				}
+			}
+			return nil, OperationalErrorf("%s: %s", denial.Kind, denial.Text)
+		}
+		// failSend handles a send that did not complete after the guard
+		// allowed it: refund the consumed rate token, bump the
+		// consecutive failure counter, and — when the bump trips the
+		// breaker — refuse this post with the new latch instead of the
+		// transport error.
+		failSend := func(err error) (any, error) {
+			bucket.Refund()
+			if reason, tripped := d.tripOnFailure(ctx, st); tripped {
+				return nil, OperationalErrorf("%s: %s", guard.KindRefusedBreaker, guard.BreakerRefusalText(reason))
+			}
 			return nil, err
 		}
 		client, owned, err := d.connect(ctx, inv)
 		if err != nil {
-			bucket.Refund()
-			return nil, err
+			return failSend(err)
 		}
 		if owned {
 			defer client.Close()
 		}
 		rooms, err := client.RoomList(ctx, apronws.RoomListParams{})
 		if err != nil {
-			bucket.Refund()
-			return nil, OperationalErrorf("room list: %v", err)
+			return failSend(OperationalErrorf("room list: %v", err))
 		}
 		room, err := ResolveRoom(rooms.Joined, rooms.NotJoined, inv.Flags["room"])
 		if err != nil {
+			// ResolveRoom only returns *RoomError (usage errors the
+			// caller can fix from the message) or nil — never a send-
+			// path failure — so refund without counting toward the
+			// breaker.
 			bucket.Refund()
 			return nil, err
 		}
@@ -86,8 +113,7 @@ func PostHandler(d Deps) clicontract.HandleFunc {
 				Title:        threadTitle(text),
 			})
 			if err != nil {
-				bucket.Refund()
-				return nil, OperationalErrorf("create thread: %v", err)
+				return failSend(OperationalErrorf("create thread: %v", err))
 			}
 			postRoom = t.ID
 			outRoomID = t.ID
@@ -105,11 +131,14 @@ func PostHandler(d Deps) clicontract.HandleFunc {
 			ReplyTo: rt,
 		})
 		if err != nil {
-			bucket.Refund()
-			return nil, OperationalErrorf("post: %v", err)
+			return failSend(OperationalErrorf("post: %v", err))
 		}
-		// The send is confirmed; a JoinRoom failure is after the
-		// confirmed send, so no refund.
+		// The send is confirmed: reset the consecutive failure counter
+		// (the latch is sticky; clearing is manual). A JoinRoom failure
+		// is after the confirmed send, so no refund.
+		if err := st.ResetPostFailures(ctx); err != nil {
+			log.Printf("whinny: post-failure reset: %v", err)
+		}
 		if err := client.JoinRoom(ctx, postRoom); err != nil {
 			return nil, OperationalErrorf("join %s: %v", postRoom, err)
 		}
@@ -126,33 +155,32 @@ func PostHandler(d Deps) clicontract.HandleFunc {
 
 // guard evaluates the send-path guard chain before a post connects:
 // the persisted breaker, the persisted rate bucket, and the quiet gate.
-// A denial returns the typed denial text as an operational error
-// (non-zero exit) and a nil bucket (no token was consumed); an allowed
-// send returns the bucket so a failed send can refund the consumed
-// token. The caller owns the store's lifecycle.
-func (d Deps) guard(ctx context.Context, st *store.Store) (*guard.RateBucket, error) {
+// A denial returns the typed denial and a nil bucket (no token was
+// consumed); an allowed send returns the bucket so a failed send can
+// refund the consumed token. The caller owns the store's lifecycle.
+func (d Deps) guard(ctx context.Context, st *store.Store) (*guard.RateBucket, guard.Denial, error) {
 	brk, err := st.GetBreaker(ctx)
 	if err != nil {
-		return nil, OperationalErrorf("breaker: %v", err)
+		return nil, guard.Denial{}, OperationalErrorf("breaker: %v", err)
 	}
 	perMinute := DefaultRatePerMinute
 	if v := d.env()("WHINNY_RATE_PER_MINUTE"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {
-			return nil, UsageErrorf("post: WHINNY_RATE_PER_MINUTE must be a positive integer, got %q", v)
+			return nil, guard.Denial{}, UsageErrorf("post: WHINNY_RATE_PER_MINUTE must be a positive integer, got %q", v)
 		}
 		perMinute = n
 	}
 	bucket := guard.NewStoreBucket(st, perMinute)
 	quietStr, err := st.GetMeta(ctx, MetaQuietUntil)
 	if err != nil {
-		return nil, OperationalErrorf("quiet: %v", err)
+		return nil, guard.Denial{}, OperationalErrorf("quiet: %v", err)
 	}
 	var quietUntil int64
 	if quietStr != "" {
 		quietUntil, err = strconv.ParseInt(quietStr, 10, 64)
 		if err != nil {
-			return nil, OperationalErrorf("quiet_until: %v", err)
+			return nil, guard.Denial{}, OperationalErrorf("quiet_until: %v", err)
 		}
 	}
 	chain := guard.NewChain(guard.Config{PerMinute: perMinute})
@@ -164,9 +192,48 @@ func (d Deps) guard(ctx context.Context, st *store.Store) (*guard.RateBucket, er
 		Now:            d.now(),
 	})
 	if denied {
-		return nil, OperationalErrorf("%s: %s", denial.Kind, denial.Text)
+		return nil, denial, nil
 	}
-	return bucket, nil
+	return bucket, guard.Denial{}, nil
+}
+
+// breakerTripReason is the outcome-neutral latch reason: both trip
+// paths (rate-limit denials and failed posts) bump the same
+// consecutive-failure counter, so the reason names the shared count,
+// not the last outcome.
+const breakerTripReason = "bad send outcomes"
+
+// breakerTripThreshold is the consecutive bad-outcome count (rate-
+// limit denials or failed posts) that latches the send-path breaker.
+// It lives beside its enforcement point: the guard only reads the
+// latch, it never trips one.
+const breakerTripThreshold = 5
+
+// tripOnFailure bumps the consecutive post-failure counter and, when
+// the bump reaches the trip threshold, latches the breaker with the
+// outcome-neutral reason. It returns the latch reason when the
+// breaker tripped. A bump or latch error is logged, not returned: the
+// caller reports the send outcome (the original error or the denial)
+// either way.
+func (d Deps) tripOnFailure(ctx context.Context, st *store.Store) (string, bool) {
+	n, err := st.BumpPostFailures(ctx)
+	if err != nil {
+		log.Printf("whinny: post-failure count: %v", err)
+		return "", false
+	}
+	if n < breakerTripThreshold {
+		return "", false
+	}
+	reason := fmt.Sprintf("%d consecutive %s", n, breakerTripReason)
+	if err := st.SetBreaker(ctx, store.Breaker{
+		Latched:   true,
+		LatchedAt: d.now().Unix(),
+		Reason:    reason,
+	}); err != nil {
+		log.Printf("whinny: breaker latch: %v", err)
+		return "", false
+	}
+	return reason, true
 }
 
 // threadTitle is the first line of the text, truncated to 80 runes.

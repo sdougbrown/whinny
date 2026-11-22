@@ -208,6 +208,12 @@ func App(d Deps) *clicontract.App {
 				Handle: ResumeHandler(d),
 			},
 			{
+				Name:   "breaker-clear",
+				Short:  "clear the send-path breaker latch and failure counter",
+				Output: clicontract.Output{Mode: clicontract.OutputRaw, SuccessExitCodes: []int{0}},
+				Handle: BreakerClearHandler(d),
+			},
+			{
 				Name:  "daemon",
 				Short: "run the wake daemon (long-running)",
 				Long: "Hold the apron connection, evaluate the wake policy over " +
