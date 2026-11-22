@@ -119,7 +119,10 @@ its own user id via `auth.test` (so the config file may omit `self.user_id`),
 and the ambient gate is forced off — Slack has no quiet/mute mapping. Slack
 tokens come only from `$SLACK_BOT_TOKEN` (bot, `xoxb-`) and
 `$SLACK_APP_TOKEN` (app-level, `xapp-`). The config file takes
-`"transport": "slack"` instead of the flag.
+`"transport": "slack"` instead of the flag. Live `message.mpim` events
+wake, but MPIM catch-up after downtime does not: `conversations.list`
+under a bot token returns no MPIMs, so MPIMs are missing from the room
+list and history catch-up.
 
 **Delivery backends** (`--deliver`):
 
