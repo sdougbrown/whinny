@@ -264,16 +264,21 @@ the model sees.
 ### One-shot and transient agents (shared mode)
 
 One daemon in shared mode serves transient identities. Watches registered
-with a delivery callback outlive the run that registered them:
+with a delivery callback outlive the run that registered them. Shared mode
+still validates like any daemon, so the config file must set `self` and a
+usable delivery backend (a shared daemon only delivers to owner callbacks,
+so `feed` costs nothing):
 
 ```sh
-whinny daemon --mode shared
+whinny daemon --mode shared --config /etc/whinny/shared.json
 whinny watch add --room general --pattern "build done" \
   --owner ci-runner --on-fire /usr/local/bin/notify-ci-runner
 ```
 
-Shared mode has no wake policy: only registered watches fire, each to its
-own owner's callback.
+with `/etc/whinny/shared.json` carrying `"mode": "shared"`, a non-empty
+`"self": {"user_id": ..., "name": ...}`, and `"deliver": "feed"`. Shared
+mode has no wake policy: only registered watches fire, each to its own
+owner's callback.
 
 ### MCP-capable harnesses
 
