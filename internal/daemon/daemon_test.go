@@ -831,6 +831,43 @@ func TestRunValidatesBackendBeforeConnect(t *testing.T) {
 	}
 }
 
+// TestRunRejectsDepsWithBothLinkAndClient: Deps carrying both an
+// injected Link and an apron Client is rejected before any dial: the
+// two transport-injection paths are mutually exclusive, and the error
+// names both fields.
+func TestRunRejectsDepsWithBothLinkAndClient(t *testing.T) {
+	srv := apronfake.New(t)
+	srv.AutoRespond = true
+	errC := make(chan error, 1)
+	go func() {
+		fc, err := srv.WaitConn(1)
+		if err != nil {
+			srv.ReportError(err)
+			errC <- err
+			return
+		}
+		errC <- serverHandshake(t, fc)
+	}()
+	client, err := apronws.Connect(context.Background(), apronws.Options{URL: srv.WSURL(), Token: "test-token"})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	if err := <-errC; err != nil {
+		t.Fatalf("server handshake: %v", err)
+	}
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	deps := Deps{Client: client, Link: newFakeLink(), Store: st, Deliver: newFakeDeliverer()}
+	if err := Run(context.Background(), baseCfg(), deps); err == nil || !strings.Contains(err.Error(), "Link") || !strings.Contains(err.Error(), "Client") {
+		t.Errorf("Run = %v, want the error naming both Link and Client", err)
+	}
+}
+
 // startHarnessWithSetup is like startHarness but calls setup (to
 // configure the fake server) after the client connects and before Run
 // starts, so the startup catch-up sees the configured responses.

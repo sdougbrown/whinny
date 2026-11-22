@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -34,7 +35,8 @@ func newRealTicker(d time.Duration) Ticker { return realTicker{t: time.NewTicker
 // Deps carries the injected dependencies. Link may be set to run the
 // daemon over any transport (tests inject a fake); otherwise Client may
 // be set (wrapped in the apron adapter), and when both are nil Run
-// connects through apronws itself and owns the client.
+// connects through apronws itself and owns the client. Setting both is
+// an error: Run rejects it before any dial.
 type Deps struct {
 	Client  *apronws.Client
 	Link    Link
@@ -104,6 +106,12 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 	}
 	if deps.Deliver == nil {
 		return errNilDep("deliverer")
+	}
+	// The two transport-injection paths are mutually exclusive: an
+	// injected Link and an apron Client both driving the run is a
+	// wiring mistake, rejected before any dial.
+	if deps.Link != nil && deps.Client != nil {
+		return fmt.Errorf("daemon: Deps sets both Link and Client; set exactly one")
 	}
 	now := deps.Now
 	if now == nil {
