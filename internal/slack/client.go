@@ -77,6 +77,25 @@ func (c *Client) PostMessage(ctx context.Context, p PostParams) (PostResult, err
 	return PostResult{TS: out.TS, Channel: out.Channel}, nil
 }
 
+// AuthResult is the auth.test result.
+type AuthResult struct {
+	UserID string
+	BotID  string
+}
+
+// AuthTest authenticates the token and returns the caller's identity:
+// the bot's user id and bot id.
+func (c *Client) AuthTest(ctx context.Context) (AuthResult, error) {
+	var out struct {
+		UserID string `json:"user_id"`
+		BotID  string `json:"bot_id"`
+	}
+	if err := c.call(ctx, "auth.test", map[string]string{}, &out); err != nil {
+		return AuthResult{}, err
+	}
+	return AuthResult{UserID: out.UserID, BotID: out.BotID}, nil
+}
+
 // ListParams is the params for conversations.list.
 type ListParams struct {
 	Types  []string
