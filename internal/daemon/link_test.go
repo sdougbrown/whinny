@@ -259,6 +259,53 @@ func TestLinkCatchUpOverHistory(t *testing.T) {
 	h.stop(t)
 }
 
+// TestApronTombstoneFeedsAuthorCache: a delete tombstone carries no body
+// to evaluate, but its author feeds the reply-author cache, so a later
+// reply to the deleted message resolves its author (and fires) even
+// though the message is gone from history.
+func TestApronTombstoneFeedsAuthorCache(t *testing.T) {
+	cfg := baseCfg() // Self.UserID = "u9"
+	h := startHarnessWithSetup(t, cfg, func(h *harness) {
+		// No history for r1: a reply to the deleted message must resolve
+		// its author from the cache (fed by the tombstone), not from a
+		// History fallback.
+		h.srv.SetCatchUp(
+			[]map[string]any{{"room_id": "r1"}},
+			map[string][]map[string]any{"r1": {}},
+		)
+	})
+
+	// A delete tombstone for message X, authored by the self (u9).
+	h.fc.Push("message", map[string]any{
+		"message_id": "X",
+		"log_id":     100,
+		"room_id":    "r1",
+		"from":       map[string]any{"user_id": "u9", "name": "squire"},
+		"deleted":    true,
+	})
+	// A plain message after the tombstone: waiting on its cursor proves
+	// the tombstone (earlier in the ordered stream) was consumed and its
+	// author fed the cache.
+	h.fc.PushMessageAt("plain", "r1", "doug", "room noise", nil, 101)
+	waitCursorAt(t, h.st, "r1", 101)
+
+	// A reply to the deleted message X: its author (u9, the self) must
+	// resolve from the cache the tombstone fed, firing a reply wake.
+	h.fc.Push("message", map[string]any{
+		"message_id": "reply1",
+		"log_id":     102,
+		"room_id":    "r1",
+		"from":       map[string]any{"user_id": "doug", "name": "doug"},
+		"body":       map[string]any{"text": "any update?"},
+		"reply_to":   map[string]any{"message_id": "X"},
+	})
+	d := h.dlv.wait(t)
+	if !strings.Contains(d.env.Text, "kind=reply") {
+		t.Errorf("envelope = %q, want a reply wake (tombstone-fed author)", d.env.Text)
+	}
+	h.stop(t)
+}
+
 func TestSlackTransportForcesAmbientOff(t *testing.T) {
 	hits := 0
 	classifier := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -190,6 +190,14 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 		d.link = newApronLink(client)
 	}
 	d.hist = newHistoryCache(d.link)
+	// A delete tombstone carries no body to evaluate, but its author is
+	// recorded so a later reply to the deleted message resolves; the
+	// adapter forwards tombstones to this callback.
+	if f, ok := d.link.(interface {
+		SetTombstoneFeed(func(string, string, string))
+	}); ok {
+		f.SetTombstoneFeed(d.hist.feed)
+	}
 	// The reconnect hook is optional: an apron link forwards it to the
 	// client; a link without the hook simply never replays on reconnect.
 	if r, ok := d.link.(interface{ SetOnReconnect(func()) }); ok {

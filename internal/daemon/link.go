@@ -50,7 +50,14 @@ type LinkEvent struct {
 type RoomRef struct{ ID, Title string }
 
 // apronLink adapts an apronws client to Link.
-type apronLink struct{ client *apronws.Client }
+type apronLink struct {
+	client *apronws.Client
+	// tombstoneFeed, if set, is called with a delete tombstone's author
+	// (messageID, roomID, author) so the reply-author cache can resolve
+	// a deleted message's author. The tombstone itself is never
+	// evaluated.
+	tombstoneFeed func(messageID, roomID, author string)
+}
 
 // newApronLink wraps an apron client.
 func newApronLink(client *apronws.Client) *apronLink { return &apronLink{client: client} }
@@ -59,6 +66,24 @@ func newApronLink(client *apronws.Client) *apronLink { return &apronLink{client:
 // (the daemon's catch-up wiring). It satisfies the optional hook the
 // Run loop looks for on any Link.
 func (l *apronLink) SetOnReconnect(fn func()) { l.client.SetOnReconnect(fn) }
+
+// SetTombstoneFeed sets the callback invoked for delete tombstones (the
+// daemon wires it to the reply-author cache).
+func (l *apronLink) SetTombstoneFeed(fn func(messageID, roomID, author string)) {
+	l.tombstoneFeed = fn
+}
+
+// feedTombstone records a delete tombstone's author (the tombstone is
+// never evaluated, but its author feeds the reply-author cache).
+func (l *apronLink) feedTombstone(rec apronws.Record) {
+	if rec.Kind != apronws.KindMessage || rec.Message == nil || !rec.Message.Deleted {
+		return
+	}
+	if l.tombstoneFeed != nil {
+		m := rec.Message
+		l.tombstoneFeed(m.MessageID, m.RoomID, m.From.UserID)
+	}
+}
 
 // Events pumps the client's record stream, keeping only message records.
 func (l *apronLink) Events(ctx context.Context) (<-chan LinkEvent, error) {
@@ -73,6 +98,7 @@ func (l *apronLink) Events(ctx context.Context) (<-chan LinkEvent, error) {
 				if !ok {
 					return
 				}
+				l.feedTombstone(rec)
 				ev, keep := apronEvent(rec)
 				if !keep {
 					continue
@@ -144,7 +170,9 @@ func (l *apronLink) History(ctx context.Context, roomID string, after int64, lim
 	}
 	var out []LinkEvent
 	for i := range res.Messages {
-		ev, ok := apronEvent(apronws.Record{Kind: apronws.KindMessage, Message: &res.Messages[i]})
+		rec := apronws.Record{Kind: apronws.KindMessage, Message: &res.Messages[i]}
+		l.feedTombstone(rec)
+		ev, ok := apronEvent(rec)
 		if ok && ev.Cursor > after {
 			out = append(out, ev)
 		}
