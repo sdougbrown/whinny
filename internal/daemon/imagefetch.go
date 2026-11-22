@@ -84,16 +84,6 @@ func newSlackFetcher(token string) *slackFetcher {
 	return f
 }
 
-// slackHostAllowed reports whether host (with optional port) is a
-// slack.com host.
-func slackHostAllowed(host string) bool {
-	if i := strings.IndexByte(host, ':'); i >= 0 {
-		host = host[:i]
-	}
-	host = strings.ToLower(host)
-	return host == "slack.com" || strings.HasSuffix(host, ".slack.com")
-}
-
 // Fetch fetches rawURL, refusing any URL off a slack.com host.
 func (f *slackFetcher) Fetch(ctx context.Context, rawURL string) ([]byte, string, error) {
 	u, err := url.Parse(rawURL)
