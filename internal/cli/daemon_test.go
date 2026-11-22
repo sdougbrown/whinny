@@ -157,6 +157,75 @@ func TestResolveDaemonConfig(t *testing.T) {
 			t.Errorf("err = %v, want usage error", err)
 		}
 	})
+
+	t.Run("slack-only env resolves without apron credentials", func(t *testing.T) {
+		slackEnv := func(k string) string {
+			switch k {
+			case "SLACK_BOT_TOKEN":
+				return "xoxb-1"
+			case "SLACK_APP_TOKEN":
+				return "xapp-1"
+			default:
+				return ""
+			}
+		}
+		cfg, err := ResolveDaemonConfig(testInvocation(map[string]string{"transport": "slack", "deliver": "feed"}), slackEnv)
+		if err != nil {
+			t.Fatalf("ResolveDaemonConfig: %v", err)
+		}
+		if cfg.Transport != daemon.TransportSlack {
+			t.Errorf("transport = %q, want slack", cfg.Transport)
+		}
+		if cfg.BotToken != "xoxb-1" || cfg.AppToken != "xapp-1" {
+			t.Errorf("tokens = %q/%q", cfg.BotToken, cfg.AppToken)
+		}
+		if cfg.URL != "" || cfg.Token != "" {
+			t.Errorf("apron endpoint = %s/%q, want empty for slack", cfg.URL, cfg.Token)
+		}
+	})
+
+	t.Run("slack transport from env resolves without apron credentials", func(t *testing.T) {
+		slackEnv := func(k string) string {
+			switch k {
+			case "WHINNY_TRANSPORT":
+				return "slack"
+			case "SLACK_BOT_TOKEN":
+				return "xoxb-1"
+			case "SLACK_APP_TOKEN":
+				return "xapp-1"
+			default:
+				return ""
+			}
+		}
+		cfg, err := ResolveDaemonConfig(testInvocation(map[string]string{"deliver": "feed"}), slackEnv)
+		if err != nil {
+			t.Fatalf("ResolveDaemonConfig: %v", err)
+		}
+		if cfg.Transport != daemon.TransportSlack {
+			t.Errorf("transport = %q, want slack (env wins)", cfg.Transport)
+		}
+	})
+
+	t.Run("apron default still requires the token", func(t *testing.T) {
+		noToken := func(string) string { return "" }
+		_, err := ResolveDaemonConfig(testInvocation(map[string]string{"exec-cmd": "true"}), noToken)
+		if err == nil || !isUsageErr(err) {
+			t.Errorf("err = %v, want the no-token usage error", err)
+		}
+	})
+
+	t.Run("slack transport missing a token is a usage error", func(t *testing.T) {
+		slackEnv := func(k string) string {
+			if k == "SLACK_BOT_TOKEN" {
+				return "xoxb-1"
+			}
+			return ""
+		}
+		_, err := ResolveDaemonConfig(testInvocation(map[string]string{"transport": "slack", "deliver": "feed"}), slackEnv)
+		if !isUsageErr(err) {
+			t.Errorf("err = %v, want usage error", err)
+		}
+	})
 }
 
 // TestResolveDaemonConfigModeDeliverPrecedence pins the mode/deliver

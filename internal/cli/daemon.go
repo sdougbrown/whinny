@@ -106,13 +106,18 @@ type daemonAmbientJSON struct {
 // ResolveDaemonConfig resolves the daemon configuration. Precedence, per
 // field:
 //
-//   - URL/token: --url/--token flags, then $WHINNY_URL/$APRON_URL and
-//     $WHINNY_TOKEN/$APRON_TOKEN, then the default endpoint.
+//   - transport: the --transport flag, then $WHINNY_TRANSPORT, then the
+//     config file, then the built-in default (apron). Resolved before
+//     the apron endpoint, so a slack-only setup never demands apron
+//     credentials.
+//   - URL/token (apron transport only): --url/--token flags, then
+//     $WHINNY_URL/$APRON_URL and $WHINNY_TOKEN/$APRON_TOKEN, then the
+//     default endpoint.
 //   - Slack tokens: $SLACK_BOT_TOKEN and $SLACK_APP_TOKEN only (never
 //     flags or the config file).
-//   - transport, mode, deliver, exec-cmd, socket-url: the --flag, then
-//     $WHINNY_TRANSPORT / $WHINNY_DAEMON_MODE / $WHINNY_DAEMON_DELIVER,
-//     then the config file, then the built-in default.
+//   - mode, deliver, exec-cmd, socket-url: the --flag, then
+//     $WHINNY_DAEMON_MODE / $WHINNY_DAEMON_DELIVER, then the config
+//     file, then the built-in default.
 //   - agent, peers, self, ambient: the config file only (no flags).
 //
 // The config file path is --config, then $WHINNY_CONFIG, then
@@ -154,23 +159,30 @@ func ResolveDaemonConfig(inv clicontract.Invocation, env func(string) string) (d
 		return daemon.Config{}, UsageErrorf("daemon: read config %s: %v", path, err)
 	}
 
-	endpoint, err := ResolveConfig(inv.Flags["url"], inv.Flags["token"], env)
-	if err != nil {
-		return daemon.Config{}, err
-	}
-	cfg.URL = endpoint.URL
-	cfg.Token = endpoint.Token
-	if p, err := StorePath(env); err == nil {
-		cfg.DBPath = p
-	}
-
+	// The transport resolves before the apron endpoint: the apron
+	// URL/token requirement applies only to the apron transport, so a
+	// slack-only setup (the README's recipe) must not fail here.
 	if v := inv.Flags["transport"]; v != "" {
 		cfg.Transport = v
 	} else if v := env("WHINNY_TRANSPORT"); v != "" {
 		cfg.Transport = v
 	}
+	if cfg.Transport == "" {
+		cfg.Transport = daemon.TransportApron
+	}
+	if cfg.Transport != daemon.TransportSlack {
+		endpoint, err := ResolveConfig(inv.Flags["url"], inv.Flags["token"], env)
+		if err != nil {
+			return daemon.Config{}, err
+		}
+		cfg.URL = endpoint.URL
+		cfg.Token = endpoint.Token
+	}
 	cfg.BotToken = env("SLACK_BOT_TOKEN")
 	cfg.AppToken = env("SLACK_APP_TOKEN")
+	if p, err := StorePath(env); err == nil {
+		cfg.DBPath = p
+	}
 	if v := inv.Flags["mode"]; v != "" {
 		cfg.Mode = v
 	} else if v := env("WHINNY_DAEMON_MODE"); v != "" {
