@@ -214,7 +214,7 @@ func TestSlackHistory(t *testing.T) {
 	if err := l.Identify(context.Background()); err != nil {
 		t.Fatalf("Identify: %v", err)
 	}
-	events, err := l.History(context.Background(), "C1", TSToCursor("1700000000.000100"), 50)
+	events, err := l.History(context.Background(), "C1", slack.TSToCursor("1700000000.000100"), 50)
 	if err != nil {
 		t.Fatalf("History: %v", err)
 	}
@@ -259,14 +259,14 @@ func TestSlackRooms(t *testing.T) {
 
 func TestTSToCursorRoundTrip(t *testing.T) {
 	for _, ts := range []string{"1700000000.000100", "1700000000.1", "1700000000.000000", "1700000000.123456"} {
-		if got := CursorToTS(TSToCursor(ts)); got != padTS(ts) {
+		if got := slack.CursorToTS(slack.TSToCursor(ts)); got != padTS(ts) {
 			t.Errorf("round trip %q = %q, want %q", ts, got, padTS(ts))
 		}
 	}
-	if TSToCursor("1700000000.1234567") != 1700000000_123456 {
+	if slack.TSToCursor("1700000000.1234567") != 1700000000_123456 {
 		t.Error("fraction longer than 6 digits must truncate")
 	}
-	if CursorToTS(0) != "" {
+	if slack.CursorToTS(0) != "" {
 		t.Error("zero cursor must map to an empty ts")
 	}
 }

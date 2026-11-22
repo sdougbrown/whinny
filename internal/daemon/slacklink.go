@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
-	"strconv"
-	"strings"
 
 	"github.com/sdougbrown/whinny/internal/slack"
 	"github.com/sdougbrown/whinny/internal/slack/slackws"
@@ -100,7 +98,7 @@ func (l *slackLink) slackEvent(ev slackws.Event) (LinkEvent, bool) {
 			Kind:   KindMessage,
 			RoomID: m.RoomID,
 			Msg:    l.wakeMsg(m),
-			Cursor: TSToCursor(m.MessageID),
+			Cursor: slack.TSToCursor(m.MessageID),
 		}, true
 	case "app_mention":
 		var w struct {
@@ -125,7 +123,7 @@ func (l *slackLink) slackEvent(ev slackws.Event) (LinkEvent, bool) {
 				Mentions: []string{l.selfUserID},
 				ReplyTo:  w.ThreadTS,
 			},
-			Cursor: TSToCursor(w.TS),
+			Cursor: slack.TSToCursor(w.TS),
 		}, true
 	default:
 		return LinkEvent{}, false
@@ -185,7 +183,7 @@ func (l *slackLink) Post(ctx context.Context, roomID, text, replyTo string) (str
 func (l *slackLink) History(ctx context.Context, roomID string, after int64, limit int) ([]LinkEvent, error) {
 	res, err := l.api.ConversationsHistory(ctx, slack.HistoryParams{
 		Channel: roomID,
-		Oldest:  CursorToTS(after),
+		Oldest:  slack.CursorToTS(after),
 		Limit:   limit,
 	})
 	if err != nil {
@@ -196,7 +194,7 @@ func (l *slackLink) History(ctx context.Context, roomID string, after int64, lim
 		if m.DeletedTS != "" || m.Subtype == "message_deleted" {
 			continue
 		}
-		cursor := TSToCursor(m.MessageID)
+		cursor := slack.TSToCursor(m.MessageID)
 		if cursor <= after {
 			continue
 		}
@@ -229,30 +227,4 @@ func (l *slackLink) Rooms(ctx context.Context) ([]RoomRef, error) {
 		}
 		cursor = res.NextCursor
 	}
-}
-
-// TSToCursor converts a Slack ts ("1234567890.123456") to a cursor:
-// epoch seconds and the fraction, in microseconds. The fraction is
-// right-padded to 6 digits (or truncated past 6), which keeps the
-// per-channel ordering Slack guarantees.
-func TSToCursor(ts string) int64 {
-	sec, frac, _ := strings.Cut(ts, ".")
-	s, err := strconv.ParseInt(sec, 10, 64)
-	if err != nil {
-		return 0
-	}
-	frac = (frac + "000000")[:6]
-	f, err := strconv.ParseInt(frac, 10, 64)
-	if err != nil {
-		return s * 1_000_000
-	}
-	return s*1_000_000 + f
-}
-
-// CursorToTS converts a cursor back to a Slack ts string.
-func CursorToTS(c int64) string {
-	if c <= 0 {
-		return ""
-	}
-	return fmt.Sprintf("%d.%06d", c/1_000_000, c%1_000_000)
 }
