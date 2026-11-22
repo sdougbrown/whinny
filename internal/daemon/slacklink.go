@@ -20,6 +20,7 @@ type slackLink struct {
 	api        *slack.Client
 	ws         *slackws.Client
 	selfUserID string
+	botID      string
 }
 
 // newSlackLink wraps the two Slack clients.
@@ -28,7 +29,7 @@ func newSlackLink(api *slack.Client, ws *slackws.Client) *slackLink {
 }
 
 // Identify resolves the bot's identity via auth.test and remembers the
-// user id; it must be called before events flow.
+// user id and bot id; it must be called before events flow.
 func (l *slackLink) Identify(ctx context.Context) error {
 	res, err := l.api.AuthTest(ctx)
 	if err != nil {
@@ -38,11 +39,15 @@ func (l *slackLink) Identify(ctx context.Context) error {
 		return fmt.Errorf("slack auth.test returned no user_id")
 	}
 	l.selfUserID = res.UserID
+	l.botID = res.BotID
 	return nil
 }
 
-// SelfUserID returns the identity resolved by Identify.
+// SelfUserID returns the user id resolved by Identify.
 func (l *slackLink) SelfUserID() string { return l.selfUserID }
+
+// BotID returns the bot id resolved by Identify.
+func (l *slackLink) BotID() string { return l.botID }
 
 // Events pumps Socket Mode events, keeping message and app_mention
 // events.
@@ -119,13 +124,19 @@ func (l *slackLink) slackEvent(ev slackws.Event) (LinkEvent, bool) {
 	}
 }
 
-// wakeMsg projects a Slack message onto the policy's Msg: bot and app
-// messages carry no user, so they attribute to the bot itself (its own
-// posts arm thread subscriptions and never wake).
+// wakeMsg projects a Slack message onto the policy's Msg. Bot and app
+// messages carry no user: the bot's own posts (its bot_id) attribute to
+// the bot's user id (driving the self-post firebreak), while other
+// bots' posts attribute to "bot:"+bot_id so they evaluate as bot peers
+// instead of being swallowed by the firebreak.
 func (l *slackLink) wakeMsg(m slack.Msg) wake.Msg {
 	from := m.FromUserID
 	if from == "" && m.BotID != "" {
-		from = l.selfUserID
+		if m.BotID == l.botID {
+			from = l.selfUserID
+		} else {
+			from = "bot:" + m.BotID
+		}
 	}
 	return wake.Msg{
 		MessageID: m.MessageID,

@@ -10,6 +10,8 @@ import (
 
 	"github.com/sdougbrown/whinny/internal/slack"
 	"github.com/sdougbrown/whinny/internal/slack/slackws"
+	"github.com/sdougbrown/whinny/internal/wake"
+	"github.com/sdougbrown/whinny/internal/watch"
 )
 
 // slackAPIFake plays the Web API endpoints the Slack link calls. Each
@@ -39,6 +41,9 @@ func TestSlackIdentify(t *testing.T) {
 	if l.SelfUserID() != "U9" {
 		t.Errorf("self = %q, want U9", l.SelfUserID())
 	}
+	if l.BotID() != "B1" {
+		t.Errorf("bot id = %q, want B1", l.BotID())
+	}
 }
 
 func TestSlackEventMessageMapping(t *testing.T) {
@@ -61,14 +66,39 @@ func TestSlackEventMessageMapping(t *testing.T) {
 }
 
 func TestSlackEventBotMessageAttribution(t *testing.T) {
-	l := &slackLink{selfUserID: "U9"}
+	l := &slackLink{selfUserID: "U9", botID: "B1"}
+	// The bot's own post (its bot_id) attributes to its user id.
 	ev, ok := l.slackEvent(slackws.Event{Type: "message", Payload: json.RawMessage(
 		`{"type":"message","channel":"C1","bot_id":"B1","subtype":"bot_message","text":"my post","ts":"1700000000.000200"}`)})
 	if !ok {
 		t.Fatal("bot message event dropped")
 	}
 	if ev.Msg.From.UserID != "U9" {
-		t.Errorf("from = %q, want the bot's own id U9", ev.Msg.From.UserID)
+		t.Errorf("self bot from = %q, want the bot's own id U9", ev.Msg.From.UserID)
+	}
+	// A foreign bot's post attributes to "bot:"+bot_id, not the self id.
+	ev2, ok := l.slackEvent(slackws.Event{Type: "message", Payload: json.RawMessage(
+		`{"type":"message","channel":"C1","bot_id":"B2","subtype":"bot_message","text":"their post","ts":"1700000000.000210"}`)})
+	if !ok {
+		t.Fatal("foreign bot message event dropped")
+	}
+	if ev2.Msg.From.UserID != "bot:B2" {
+		t.Errorf("foreign bot from = %q, want bot:B2", ev2.Msg.From.UserID)
+	}
+
+	// The foreign bot evaluates as a bot peer: a plain text with no
+	// matching watch is ignored (the policy's bot firebreak), but a
+	// matching watch fires.
+	peers := wake.Peers{"bot:B2": {Name: "otherbot", IsBot: true}}
+	self := wake.Self{UserID: "U9"}
+	if dec := wake.Evaluate(context.Background(), wake.In{Msg: ev2.Msg, Self: self, Peers: peers}); dec.Wake {
+		t.Errorf("foreign bot plain text woke (%+v); want ignored (bot peer, no watch match)", dec)
+	}
+	bTrue := true
+	watches := []watch.Watch{{ID: "w1", RoomID: "C1", Kind: watch.KindPattern, Pattern: "their", Note: "n", Once: &bTrue}}
+	dec := wake.Evaluate(context.Background(), wake.In{Msg: ev2.Msg, Self: self, Peers: peers, Watches: watches})
+	if !dec.Wake || dec.Kind != wake.KindWatch {
+		t.Errorf("foreign bot with matching watch = %+v; want a watch wake", dec)
 	}
 }
 
