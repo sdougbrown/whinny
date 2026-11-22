@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1426,7 +1425,6 @@ func TestSlackSelfIDMismatchWins(t *testing.T) {
 			select {
 			case payload := <-events:
 				frame := `{"type":"events_api","envelope_id":"e1","payload":{"type":"event_callback","event":` + payload + `}}`
-				fmt.Fprintln(os.Stderr, "FAKEWS: wrote frame")
 				if err := conn.Write(context.Background(), websocket.MessageText, []byte(frame)); err != nil {
 					return
 				}
@@ -1440,7 +1438,6 @@ func TestSlackSelfIDMismatchWins(t *testing.T) {
 		}
 	}))
 	defer ws.Close()
-	fmt.Fprintln(os.Stderr, "DBGURL api="+api.URL+" ws="+ws.URL)
 	wsURL.Store("ws://" + strings.TrimPrefix(ws.URL, "http://"))
 
 	cfg := baseCfg()

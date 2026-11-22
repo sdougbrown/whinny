@@ -6,7 +6,6 @@ package slackws
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -99,12 +98,10 @@ func Connect(ctx context.Context, opts Options) (*Client, error) {
 		c.cancel()
 		return nil, err
 	}
-	log.Printf("DBG open ok, url=%q", url)
 	if err := c.dial(ctx, url); err != nil {
 		c.cancel()
 		return nil, err
 	}
-	log.Printf("DBG dialed ok")
 	go c.run()
 	return c, nil
 }

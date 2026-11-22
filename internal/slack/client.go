@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -283,8 +282,6 @@ func (c *Client) call(ctx context.Context, method string, params any, out any) e
 	if err != nil {
 		return err
 	}
-	log.Printf("DBG call: %s %s", method, c.baseURL)
-	log.Printf("DBG req built")
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/"+method, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -292,7 +289,6 @@ func (c *Client) call(ctx context.Context, method string, params any, out any) e
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(req)
-	log.Printf("DBG do returned")
 	if err != nil {
 		return err
 	}

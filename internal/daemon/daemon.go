@@ -154,7 +154,6 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 	case deps.Link != nil:
 		d.link = deps.Link
 	case cfg.Transport == TransportSlack:
-		log.Printf("DBG: slack branch entered")
 		apiOpts := []slack.ClientOption{}
 		if deps.SlackBaseURL != "" {
 			apiOpts = append(apiOpts, slack.WithBaseURL(deps.SlackBaseURL))
@@ -189,7 +188,6 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 		// transport switch); carry the resolved id through so the policy
 		// reads it.
 		d.cfg.Self.UserID = cfg.Self.UserID
-		log.Printf("DBG identify done self=%q", cfg.Self.UserID)
 		d.link = link
 		log.Printf("daemon: connected to slack as %s", link.SelfUserID())
 	default:
