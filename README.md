@@ -199,6 +199,9 @@ default 20).
 - The CLI's send path is apron-only: with `--transport slack` the daemon
   receives and delivers wakes, but `whinny post` and friends still talk to
   apron rooms (posting to Slack rooms is a follow-up).
+- Slack "reply to my message" wakes only when the bot's post is the
+  thread root: `ReplyTo` carries the `thread_ts` (thread root), so replies
+  to the bot's non-root thread posts don't wake.
 - Feed image fetch is same-origin restricted and capped.
 - Delivery runs synchronously in the record loop: a slow deliverer can
   backpressure the connection.
@@ -292,9 +295,11 @@ whinny daemon --transport slack --deliver feed --config /etc/whinny/daemon.json
 ```
 
 Room ids in watches and cursors are Slack channel ids; the ambient gate is
-forced off (no quiet mapping yet). The CLI send path stays apron-only in this
-phase — the Slack daemon receives and delivers, but `whinny post` still
-targets apron rooms.
+forced off (no quiet mapping yet). "Reply to my message" wakes only when
+the bot's post is the thread root (a reply's `thread_ts` is the thread
+root, so replies to the bot's non-root thread posts don't wake). The CLI
+send path stays apron-only in this phase — the Slack daemon receives and
+delivers, but `whinny post` still targets apron rooms.
 
 ### One-shot and transient agents (shared mode)
 
