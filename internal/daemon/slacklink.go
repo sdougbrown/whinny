@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"sort"
 
+	"strings"
+
 	"github.com/sdougbrown/whinny/internal/slack"
 	"github.com/sdougbrown/whinny/internal/slack/slackws"
 	"github.com/sdougbrown/whinny/internal/wake"
@@ -91,6 +93,13 @@ func (l *slackLink) slackEvent(ev slackws.Event) (LinkEvent, bool) {
 	case "message":
 		m, err := slack.DecodeMessage(ev.Payload)
 		if err != nil || m.DeletedTS != "" {
+			return LinkEvent{}, false
+		}
+		// Room-metadata subtypes (join/leave/topic/name/purpose, the
+		// channel_ and group_ families) are not chat: apron drops the
+		// equivalent room-update records, and letting them through
+		// would let pattern watches fire on join/leave text.
+		if strings.HasPrefix(m.Subtype, "channel_") || strings.HasPrefix(m.Subtype, "group_") {
 			return LinkEvent{}, false
 		}
 		return LinkEvent{
@@ -208,6 +217,10 @@ func (l *slackLink) History(ctx context.Context, roomID string, after int64, lim
 
 // Rooms lists every conversation the bot is in, following cursors.
 func (l *slackLink) Rooms(ctx context.Context) ([]RoomRef, error) {
+	// Known limitation: under a bot token conversations.list returns no
+	// MPIMs, so this listing (and reconnect catch-up over it) misses
+	// them — but live message.mpim events still wake. Documented in the
+	// README's known-gaps list.
 	types := []string{"public_channel", "private_channel", "mpim", "im"}
 	var out []RoomRef
 	cursor := ""

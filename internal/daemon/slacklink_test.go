@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"fmt"
 	"testing"
 
 	"github.com/sdougbrown/whinny/internal/slack"
@@ -278,4 +279,20 @@ func padTS(ts string) string {
 		frac += "0"
 	}
 	return sec + "." + frac
+}
+
+func TestSlackEventDropsRoomMetadataSubtypes(t *testing.T) {
+	l := &slackLink{selfUserID: "USELF", botID: "B1"}
+	for _, subtype := range []string{"channel_join", "channel_leave", "channel_topic", "group_join"} {
+		payload := fmt.Sprintf(`{"type":"message","channel":"C1","user":"U2","text":"<@USELF> has joined","ts":"1700000000.000100","subtype":%q}`, subtype)
+		if _, ok := l.slackEvent(slackws.Event{Type: "message", Payload: json.RawMessage(payload)}); ok {
+			t.Fatalf("subtype %q delivered as a chat event; want dropped", subtype)
+		}
+	}
+	plain := `{"type":"message","channel":"C1","user":"U2","text":"hello","ts":"1700000000.000100"}`
+	if ev, ok := l.slackEvent(slackws.Event{Type: "message", Payload: json.RawMessage(plain)}); !ok {
+		t.Fatal("plain message dropped; want delivered")
+	} else if ev.Msg.Text != "hello" {
+		t.Fatalf("plain message text = %q", ev.Msg.Text)
+	}
 }
