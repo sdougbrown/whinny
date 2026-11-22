@@ -23,6 +23,8 @@ type fakeSlackAPI struct {
 	// historyJSON overrides the canned conversations.history payload
 	// when set (tests that need specific message shapes).
 	historyJSON string
+	// authFail true makes /auth.test answer an error.
+	authFail bool
 }
 
 func newFakeSlackAPI(t *testing.T) (*fakeSlackAPI, *slack.Client) {
@@ -85,6 +87,10 @@ func newFakeSlackAPI(t *testing.T) (*fakeSlackAPI, *slack.Client) {
 				{"type":"message","bot_id":"B1","text":"from the bot","ts":"1700000000.000300"}
 			]}`))
 		case "/auth.test":
+			if f.authFail {
+				w.Write([]byte(`{"ok":false,"error":"rate_limited"}`))
+				return
+			}
 			w.Write([]byte(`{"ok":true,"user_id":"U-SELF","bot_id":"B-SELF"}`))
 		default:
 			w.Write([]byte(`{"ok":false,"error":"not_mocked"}`))
@@ -247,5 +253,57 @@ func TestSlackClientHistorySelfBotAttribution(t *testing.T) {
 	}
 	if got := res.Messages[0].From.UserID; got != "U-SELF" {
 		t.Fatalf("from = %q, want the bot's own user id U-SELF", got)
+	}
+}
+
+// TestSlackClientHistoryTombstone: a message_deleted tombstone maps to
+// the apron contract — the deleted message's ts is the id and the body
+// is nil.
+func TestSlackClientHistoryTombstone(t *testing.T) {
+	f, api := newFakeSlackAPI(t)
+	f.historyJSON = `{"ok":true,"messages":[
+		{"type":"message","subtype":"message_deleted","ts":"1700000000.000900","deleted_ts":"1700000000.000100","channel":"C1"}
+	]}`
+	c := NewSlackClient(api)
+
+	res, err := c.History(context.Background(), apronws.HistoryParams{RoomID: "C1", Limit: 20})
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	if len(res.Messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(res.Messages))
+	}
+	m := res.Messages[0]
+	if !m.Deleted {
+		t.Fatalf("deleted = false, want true")
+	}
+	if m.MessageID != "1700000000.000100" {
+		t.Fatalf("message id = %q, want the deleted message's ts", m.MessageID)
+	}
+	if m.Body != nil {
+		t.Fatalf("body = %+v, want nil on a tombstone", m.Body)
+	}
+}
+
+// TestSlackClientHistorySurvivesAuthFailure: a transient auth.test
+// failure must not discard the fetched history; attribution degrades
+// to bot:<bot id> for the bot's own posts.
+func TestSlackClientHistorySurvivesAuthFailure(t *testing.T) {
+	f, api := newFakeSlackAPI(t)
+	f.authFail = true
+	f.historyJSON = `{"ok":true,"messages":[
+		{"type":"message","bot_id":"B1","text":"from a bot","ts":"1700000000.000400"}
+	]}`
+	c := NewSlackClient(api)
+
+	res, err := c.History(context.Background(), apronws.HistoryParams{RoomID: "C1", Limit: 20})
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	if len(res.Messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(res.Messages))
+	}
+	if got := res.Messages[0].From.UserID; got != "bot:B1" {
+		t.Fatalf("from = %q, want bot:B1", got)
 	}
 }

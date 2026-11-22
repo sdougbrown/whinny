@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"log"
 	"sort"
 	"sync"
 
@@ -101,10 +102,30 @@ func (c *SlackClient) History(ctx context.Context, p apronws.HistoryParams) (apr
 		return slack.TSToCursor(res.Messages[i].MessageID) < slack.TSToCursor(res.Messages[j].MessageID)
 	})
 	if err := c.resolveSelf(ctx); err != nil {
-		return apronws.HistoryResult{}, err
+		// Attribution is the only thing the identity drives: a
+		// transient auth.test failure must not throw away the
+		// already-fetched history. The bot's own posts then
+		// attribute as bot:<bot id>.
+		log.Printf("whinny: resolve slack identity: %v", err)
 	}
 	msgs := make([]apronws.Message, 0, len(res.Messages))
 	for _, m := range res.Messages {
+		if m.DeletedTS != "" || m.Subtype == "message_deleted" {
+			// A tombstone replaces the message it removes: the id
+			// is the deleted message's ts and the body is nil,
+			// matching the apron contract.
+			id := m.DeletedTS
+			if id == "" {
+				id = m.MessageID
+			}
+			msgs = append(msgs, apronws.Message{
+				LogID:     apronws.LogID(slack.TSToCursor(id)),
+				MessageID: id,
+				RoomID:    m.RoomID,
+				Deleted:   true,
+			})
+			continue
+		}
 		// The ts converts to a log position so --since/--before
 		// filtering works on Slack; per-channel ordering is preserved.
 		from := slack.AuthorID(m.FromUserID, m.BotID, c.selfUserID, c.selfBotID)
@@ -114,7 +135,6 @@ func (c *SlackClient) History(ctx context.Context, p apronws.HistoryParams) (apr
 			RoomID:    m.RoomID,
 			From:      apronws.From{UserID: from},
 			Body:      &apronws.Body{Text: m.Text},
-			Deleted:   m.DeletedTS != "",
 		}
 		if m.ReplyTo != "" {
 			msg.ReplyTo = &apronws.ReplyTo{MessageID: m.ReplyTo}
