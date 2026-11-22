@@ -77,6 +77,38 @@ func (c *Client) PostMessage(ctx context.Context, p PostParams) (PostResult, err
 	return PostResult{TS: out.TS, Channel: out.Channel}, nil
 }
 
+// ConversationsListAll lists every unarchived conversation of the
+// given types, following response cursors. Both room listings — the
+// daemon's reconnect catch-up and the CLI's send-path resolution —
+// share it, so the two paths cannot drift apart. As a belt-and-braces
+// guard against API non-compliance it also filters channels that
+// report is_archived despite exclude_archived.
+func (c *Client) ConversationsListAll(ctx context.Context, types []string) ([]Channel, error) {
+	var out []Channel
+	cursor := ""
+	for {
+		res, err := c.ConversationsList(ctx, ListParams{
+			Types:           types,
+			Cursor:          cursor,
+			Limit:           200,
+			ExcludeArchived: true,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, ch := range res.Channels {
+			if ch.IsArchived {
+				continue
+			}
+			out = append(out, ch)
+		}
+		if res.NextCursor == "" {
+			return out, nil
+		}
+		cursor = res.NextCursor
+	}
+}
+
 // AuthResult is the auth.test result.
 type AuthResult struct {
 	UserID string
@@ -118,6 +150,8 @@ type ListParams struct {
 	Types  []string
 	Cursor string
 	Limit  int
+	// ExcludeArchived drops archived channels from the result.
+	ExcludeArchived bool
 }
 
 // Channel is one room from conversations.list.
@@ -125,6 +159,10 @@ type Channel struct {
 	ID   string
 	Name string
 	IsIM bool
+	// IsMember is the channel object's is_member: the bot is a member.
+	IsMember bool
+	// IsArchived is the channel object's is_archived.
+	IsArchived bool
 }
 
 // ListResult is the conversations.list result.
@@ -145,13 +183,18 @@ func (c *Client) ConversationsList(ctx context.Context, p ListParams) (ListResul
 	if p.Limit > 0 {
 		params["limit"] = p.Limit
 	}
+	if p.ExcludeArchived {
+		params["exclude_archived"] = true
+	}
 	var out struct {
 		Channels []struct {
-			ID        string `json:"id"`
-			Name      string `json:"name"`
-			IsIM      bool   `json:"is_im"`
-			IsChannel bool   `json:"is_channel"`
-			IsGroup   bool   `json:"is_group"`
+			ID         string `json:"id"`
+			Name       string `json:"name"`
+			IsIM       bool   `json:"is_im"`
+			IsChannel  bool   `json:"is_channel"`
+			IsGroup    bool   `json:"is_group"`
+			IsMember   bool   `json:"is_member"`
+			IsArchived bool   `json:"is_archived"`
 		} `json:"channels"`
 		ResponseMetadata struct {
 			NextCursor string `json:"next_cursor"`
@@ -162,7 +205,7 @@ func (c *Client) ConversationsList(ctx context.Context, p ListParams) (ListResul
 	}
 	res := ListResult{NextCursor: out.ResponseMetadata.NextCursor}
 	for _, ch := range out.Channels {
-		res.Channels = append(res.Channels, Channel{ID: ch.ID, Name: ch.Name, IsIM: ch.IsIM})
+		res.Channels = append(res.Channels, Channel{ID: ch.ID, Name: ch.Name, IsIM: ch.IsIM, IsMember: ch.IsMember, IsArchived: ch.IsArchived})
 	}
 	return res, nil
 }

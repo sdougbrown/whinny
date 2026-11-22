@@ -125,3 +125,22 @@ func ParseMentions(text string) []string {
 	}
 	return out
 }
+
+// AuthorID attributes a message to a stable identity string: the human
+// sender's user id when present, the bot's own user id when the message
+// came from the resolving bot itself, or "bot:<bot id>" for other bots
+// — so wake evaluation and history output agree on one identity per
+// sender. Callers that know their own identity pass it; empty
+// selfUserID/selfBotID skip the self-match.
+func AuthorID(fromUserID, botID, selfUserID, selfBotID string) string {
+	if fromUserID != "" {
+		return fromUserID
+	}
+	if botID == "" {
+		return ""
+	}
+	if botID == selfBotID && selfUserID != "" {
+		return selfUserID
+	}
+	return "bot:" + botID
+}

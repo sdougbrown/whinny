@@ -379,3 +379,36 @@ func TestParseRetryAfter(t *testing.T) {
 		}
 	}
 }
+
+// TestConversationsListAllFiltersArchived: the shared listing follows
+// cursors and drops channels reporting is_archived even when the API
+// ignores exclude_archived (belt-and-braces against non-compliance).
+func TestConversationsListAllFiltersArchived(t *testing.T) {
+	var calls int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		calls++
+		if calls == 1 {
+			w.Write([]byte(`{"ok":true,"channels":[
+				{"id":"C1","name":"live","is_member":true},
+				{"id":"C9","name":"old","is_member":true,"is_archived":true}
+			],"response_metadata":{"next_cursor":"page2"}}`))
+			return
+		}
+		w.Write([]byte(`{"ok":true,"channels":[{"id":"C2","name":"more"}]}`))
+	}))
+	t.Cleanup(ts.Close)
+	c := NewClient("xoxb-test", WithBaseURL(ts.URL))
+
+	channels, err := c.ConversationsListAll(context.Background(), []string{"public_channel"})
+	if err != nil {
+		t.Fatalf("ConversationsListAll: %v", err)
+	}
+	ids := map[string]bool{}
+	for _, ch := range channels {
+		ids[ch.ID] = true
+	}
+	if len(channels) != 2 || !ids["C1"] || !ids["C2"] || ids["C9"] {
+		t.Fatalf("channels = %+v, want C1 and C2 without the archived C9", channels)
+	}
+}

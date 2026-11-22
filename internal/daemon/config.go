@@ -60,8 +60,8 @@ type Config struct {
 	// URL and Token are the apron endpoint and auth token.
 	URL, Token string
 	// Transport selects the room transport: "apron" (default) or
-	// "slack". Slack reads BotToken/AppToken; the CLI stays apron-only
-	// in this phase (posting to Slack rooms is a follow-up).
+	// "slack". Slack reads BotToken/AppToken; the CLI resolves the
+	// same vocabulary from $WHINNY_TRANSPORT.
 	Transport string
 	// BotToken and AppToken are the Slack bot token (xoxb-) and
 	// app-level token (xapp-) for the slack transport.

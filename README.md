@@ -199,9 +199,11 @@ default 20).
 
 ## Known gaps (v1)
 
-- The CLI's send path is apron-only: with `--transport slack` the daemon
-  receives and delivers wakes, but `whinny post` and friends still talk to
-  apron rooms (posting to Slack rooms is a follow-up).
+- The CLI's send path supports both transports via `WHINNY_TRANSPORT`
+  (default apron): on `slack`, `whinny post` posts through the Slack
+  Web API, and rooms and history resolve from `conversations.list` and
+  `conversations.history`. `--thread-of` is unsupported on Slack (Slack
+  threads are not rooms).
 - Slack "reply to my message" wakes only when the bot's post is the
   thread root: `ReplyTo` carries the `thread_ts` (thread root), so replies
   to the bot's non-root thread posts don't wake.

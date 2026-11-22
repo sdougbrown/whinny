@@ -144,14 +144,7 @@ func (l *slackLink) slackEvent(ev slackws.Event) (LinkEvent, bool) {
 // a message and its app_mention share a ts, so whichever wins the
 // cursor dedupe race carries the mention.
 func (l *slackLink) wakeMsg(m slack.Msg) wake.Msg {
-	from := m.FromUserID
-	if from == "" && m.BotID != "" {
-		if m.BotID == l.botID {
-			from = l.selfUserID
-		} else {
-			from = "bot:" + m.BotID
-		}
-	}
+	from := slack.AuthorID(m.FromUserID, m.BotID, l.selfUserID, l.botID)
 	return wake.Msg{
 		MessageID: m.MessageID,
 		RoomID:    m.RoomID,
@@ -203,26 +196,27 @@ func (l *slackLink) History(ctx context.Context, roomID string, after int64, lim
 	return out, nil
 }
 
-// Rooms lists every conversation the bot is in, following cursors.
+// Rooms lists every unarchived conversation the bot is in, following
+// cursors — the same listing the CLI's send path resolves rooms from,
+// so receive and send agree on which rooms exist. Archived channels
+// cannot receive posts, so catch-up over them would never deliver.
 func (l *slackLink) Rooms(ctx context.Context) ([]RoomRef, error) {
 	// Known limitation: under a bot token conversations.list returns no
 	// MPIMs, so this listing (and reconnect catch-up over it) misses
 	// them — but live message.mpim events still wake. Documented in the
-	// README's known-gaps list.
-	types := []string{"public_channel", "private_channel", "mpim", "im"}
-	var out []RoomRef
-	cursor := ""
-	for {
-		res, err := l.api.ConversationsList(ctx, slack.ListParams{Types: types, Cursor: cursor, Limit: 200})
-		if err != nil {
-			return nil, err
-		}
-		for _, ch := range res.Channels {
-			out = append(out, RoomRef{ID: ch.ID, Title: ch.Name})
-		}
-		if res.NextCursor == "" {
-			return out, nil
-		}
-		cursor = res.NextCursor
+	// README's known-gaps list. Channels archived mid-disconnect are a
+	// second accepted gap: catch-up lists unarchived rooms only (shared
+	// with the CLI's send-path resolution), so a message posted before
+	// the archive is not replayed; the live path delivers regardless of
+	// archive status.
+	channels, err := l.api.ConversationsListAll(ctx,
+		[]string{"public_channel", "private_channel", "mpim", "im"})
+	if err != nil {
+		return nil, err
 	}
+	out := make([]RoomRef, 0, len(channels))
+	for _, ch := range channels {
+		out = append(out, RoomRef{ID: ch.ID, Title: ch.Name})
+	}
+	return out, nil
 }
