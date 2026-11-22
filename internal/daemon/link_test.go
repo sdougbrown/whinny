@@ -134,8 +134,11 @@ func (f *fakeLink) setHistory(evs []LinkEvent) {
 
 func (f *fakeLink) push(ev LinkEvent) { f.events <- ev }
 
-// startLinkHarness runs the daemon over a fakeLink.
-func startLinkHarness(t *testing.T, cfg Config) (*fakeLink, *harness) {
+// startLinkHarness runs the daemon over a fakeLink. If setup is
+// non-nil, it is called (to seed the store and the link's history)
+// after the store opens and before Run starts, so the startup
+// catch-up sees the seeded state.
+func startLinkHarness(t *testing.T, cfg Config, setup func(*fakeLink, *harness)) (*fakeLink, *harness) {
 	t.Helper()
 	h := &harness{
 		dlv:    newFakeDeliverer(),
@@ -150,6 +153,9 @@ func startLinkHarness(t *testing.T, cfg Config) (*fakeLink, *harness) {
 	h.st = st
 	t.Cleanup(func() { h.st.Close() })
 	link := newFakeLink()
+	if setup != nil {
+		setup(link, h)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h.cancel = cancel
 	t.Cleanup(h.cancel)
@@ -183,7 +189,7 @@ func msgEvent(room, from, text string, cursor int64, mentions ...string) LinkEve
 
 func TestLinkMentionWake(t *testing.T) {
 	cfg := baseCfg()
-	link, h := startLinkHarness(t, cfg)
+	link, h := startLinkHarness(t, cfg, nil)
 
 	link.push(msgEvent("r1", "doug", "squire can you look at the roster", 100, "u9"))
 	d := h.dlv.wait(t)
@@ -199,7 +205,7 @@ func TestLinkMentionWake(t *testing.T) {
 
 func TestLinkCursorDedupe(t *testing.T) {
 	cfg := baseCfg()
-	link, h := startLinkHarness(t, cfg)
+	link, h := startLinkHarness(t, cfg, nil)
 
 	link.push(msgEvent("r1", "doug", "squire hello", 100, "u9"))
 	d := h.dlv.wait(t)
@@ -234,15 +240,18 @@ func waitCursorAt(t *testing.T, st *store.Store, room string, want int64) {
 
 func TestLinkCatchUpOverHistory(t *testing.T) {
 	cfg := baseCfg()
-	link, h := startLinkHarness(t, cfg)
-	// The cursor sits at 40: catch-up must replay only newer events.
-	if err := h.st.SetCursor(context.Background(), "r1", 40); err != nil {
-		t.Fatalf("set cursor: %v", err)
-	}
-	link.setHistory([]LinkEvent{
-		msgEvent("r1", "doug", "too old", 40, "u9"),
-		msgEvent("r1", "doug", "squire missed this one", 50, "u9"),
-		msgEvent("r1", "doug", "and this", 60, "u9"),
+	_, h := startLinkHarness(t, cfg, func(link *fakeLink, h *harness) {
+		// Seed the cursor and history before Run starts, so the startup
+		// catch-up sees them (no race with the run loop).
+		// The cursor sits at 40: catch-up must replay only newer events.
+		if err := h.st.SetCursor(context.Background(), "r1", 40); err != nil {
+			t.Fatalf("set cursor: %v", err)
+		}
+		link.setHistory([]LinkEvent{
+			msgEvent("r1", "doug", "too old", 40, "u9"),
+			msgEvent("r1", "doug", "squire missed this one", 50, "u9"),
+			msgEvent("r1", "doug", "and this", 60, "u9"),
+		})
 	})
 	d := h.dlv.wait(t)
 	if !strings.Contains(d.env.Text, "missed this one") {
@@ -320,7 +329,7 @@ func TestSlackTransportForcesAmbientOff(t *testing.T) {
 	// must still pass backend validation.
 	cfg.BotToken, cfg.AppToken = "xoxb-test", "xapp-test"
 	cfg.Ambient = AmbientConfig{Endpoint: classifier.URL, MinSpacing: time.Minute, MaxPerHour: 2}
-	link, h := startLinkHarness(t, cfg)
+	link, h := startLinkHarness(t, cfg, nil)
 	link.rooms = nil // no catch-up noise
 
 	link.push(msgEvent("r1", "doug", "anyone around?", 100))
