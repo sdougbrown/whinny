@@ -8,7 +8,8 @@ send path. The room wakes the agent only when the wake policy says so.
 
 The architecture has three layers. The **wake layer** evaluates every inbound
 room message against deterministic rules: mention, reply-to-my-message,
-registered watches, and one ambient gate. It decides only whether the agent
+registered watches, and one ambient gate (on apron, a reaction to one of the
+bot's messages also wakes). It decides only whether the agent
 wakes, never whether it replies. The **policy** holds the ack-storm
 firebreak: a bot's own traffic only evaluates watches, and a `peers` map
 distinguishes bots from humans. The **send path** is the single outbound
@@ -73,6 +74,17 @@ Common flags on every command: `--url <endpoint>` (`$WHINNY_URL`, then
   (client-side cursor filters; a cursor outside the fetched window is a usage
   error), `--json`.
 - `whinny rooms` — list joined and not-joined rooms. Flags: `--json`.
+- `whinny reactions [emoji...]` — set the bot's complete reaction set on one
+  message; with no emoji arguments the set is cleared (apron §4.7: the
+  request replaces the caller's set, duplicates collapse, an unchanged set
+  logs nothing). The send-path guard chain runs before the connection opens,
+  and the target message must be in the room's recent history. Flags:
+  `--room <id|title>` (required to set), `--message <message_id>` (required
+  to set; ids arrive in wake headers and `history --json`), `--json`.
+  Entries are Unicode emoji (`👍`) or custom emoji keys (`:party:`) — run
+  `whinny reactions --list` to see what the server offers: its
+  `reactions` capability and the custom emoji catalog (`--json` prints
+  both as JSON).
 - `whinny watch add` — add a wake watch. Flags: `--room` (required), and at
   least one of `--from <user_id>`, `--pattern <regex>` (message text and embed
   titles/captions), `--thread <message_id>`, `--reply-to <message_id>`;
@@ -210,6 +222,11 @@ default 20).
 - Slack "reply to my message" wakes only when the bot's post is the
   thread root: `ReplyTo` carries the `thread_ts` (thread root), so replies
   to the bot's non-root thread posts don't wake.
+- `whinny reactions` is apron-only: the Slack transport refuses it (Slack's
+  `reactions.add` takes Slack-specific emoji names, not Unicode, and the
+  mapping has no API surface worth replicating).
+- Reactions to the bot's messages wake only on apron: Slack's
+  `reaction_added` events are not wired into the daemon's wake path.
 - Slack delete tombstones carry no author, so the reply-author cache
   cannot resolve a deleted message's author on Slack (apron's tombstones
   do feed it).
@@ -353,8 +370,9 @@ builds both binaries, starts a fresh server on an ephemeral port with
 sign-in codes going to the server log, enrolls a bot (`whinny-e2e`) and a
 human (`doug-e2e`) through the email ceremony (`e2e/aprontool` speaks raw
 Apron frames), runs the daemon in resident mode with exec delivery into a
-sink file, and asserts the mention wake, a watch hit, a watch expiry, and the
-quiet gate's refusal with no message posted. Everything runs under a `mktemp`
+sink file, and asserts the mention wake, a reaction set by the bot and a
+reaction wake when the human reacts back, a watch hit, a watch expiry, and
+the quiet gate's refusal with no message posted. Everything runs under a `mktemp`
 directory; waits poll conditions with deadlines.
 
 ```sh

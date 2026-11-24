@@ -13,6 +13,11 @@ import (
 // as messages.
 const KindMessage = "message"
 
+// KindReaction is the LinkEvent kind for an inbound reaction-set push
+// on a message. Msg carries the reacted-to message's id with an empty
+// Text; Rec carries the full reaction-set record.
+const KindReaction = "reaction"
+
 // Link is the room transport the daemon runs over. The daemon is the
 // consumer: it needs inbound message events, posting, history (for
 // catch-up and reply-author lookups), and the room list; everything
@@ -26,8 +31,9 @@ type Link interface {
 	// Post sends text to a room, optionally as a reply; returns the
 	// message id.
 	Post(ctx context.Context, roomID, text, replyTo string) (string, error)
-	// History returns message events for a room strictly newer than
-	// after (a cursor; 0 = from the start), oldest first, capped.
+	// History returns message and reaction events for a room strictly
+	// newer than after (a cursor; 0 = from the start), oldest first,
+	// capped. Reaction events carry the full record in Rec.
 	History(ctx context.Context, roomID string, after int64, limit int) ([]LinkEvent, error)
 	// Rooms lists the rooms the bot is in.
 	Rooms(ctx context.Context) ([]RoomRef, error)
@@ -44,6 +50,8 @@ type LinkEvent struct {
 	Cursor int64
 	// ImageURL is the first image attachment's URL, "" when none.
 	ImageURL string
+	// Rec is the full reaction-set record on a KindReaction event.
+	Rec *apronws.ReactionsRecord
 }
 
 // RoomRef is one room the bot is in.
@@ -116,8 +124,22 @@ func (l *apronLink) Events(ctx context.Context) (<-chan LinkEvent, error) {
 
 // apronEvent maps one record to a LinkEvent. Room updates, activities,
 // and delete tombstones are dropped: the record contract has the daemon
-// ignoring them, and a tombstone carries no body to evaluate.
+// ignoring them, and a tombstone carries no body to evaluate. A
+// reactions record becomes a KindReaction event; the wake decision runs
+// on the main loop like every other event, so cursor writes stay in
+// log order.
 func apronEvent(rec apronws.Record) (LinkEvent, bool) {
+	if rec.Kind == apronws.KindReactions {
+		if rec.Reactions == nil {
+			return LinkEvent{}, false
+		}
+		return LinkEvent{
+			Kind:   KindReaction,
+			RoomID: rec.Reactions.RoomID,
+			Cursor: int64(rec.Reactions.LogID),
+			Rec:    rec.Reactions,
+		}, true
+	}
 	if rec.Kind != apronws.KindMessage || rec.Message == nil || rec.Message.Deleted {
 		return LinkEvent{}, false
 	}
@@ -172,6 +194,16 @@ func (l *apronLink) History(ctx context.Context, roomID string, after int64, lim
 	for i := range res.Messages {
 		rec := apronws.Record{Kind: apronws.KindMessage, Message: &res.Messages[i]}
 		l.feedTombstone(rec)
+		ev, ok := apronEvent(rec)
+		if ok && ev.Cursor > after {
+			out = append(out, ev)
+		}
+	}
+	// The log's reaction records ride the same window: without them a
+	// reaction during a disconnect gap would never wake, while a
+	// mention in the same gap replays through catch-up.
+	for i := range res.Reactions {
+		rec := apronws.Record{Kind: apronws.KindReactions, Reactions: &res.Reactions[i]}
 		ev, ok := apronEvent(rec)
 		if ok && ev.Cursor > after {
 			out = append(out, ev)

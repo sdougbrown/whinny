@@ -20,6 +20,17 @@ type fakeClient struct {
 	threadID    string
 	closeCalls  int
 	postErr     error
+	// reactionSets records SetReactions calls in order.
+	reactionSets    []reactionSetCall
+	setReactionsErr error
+	emojiCatalog    map[string]apronws.EmojiEntry
+	capabilities    []string
+}
+
+// reactionSetCall is one recorded SetReactions call.
+type reactionSetCall struct {
+	MessageID string
+	Emojis    []string
 }
 
 func (f *fakeClient) PostMessage(_ context.Context, p apronws.PostParams) (apronws.PostResult, error) {
@@ -47,6 +58,27 @@ func (f *fakeClient) CreateThread(_ context.Context, p apronws.CreateThreadParam
 func (f *fakeClient) JoinRoom(_ context.Context, id string) error {
 	f.joinedRooms = append(f.joinedRooms, id)
 	return nil
+}
+
+func (f *fakeClient) SetReactions(_ context.Context, messageID string, emojis []string) error {
+	if f.setReactionsErr != nil {
+		return f.setReactionsErr
+	}
+	f.reactionSets = append(f.reactionSets, reactionSetCall{MessageID: messageID, Emojis: emojis})
+	return nil
+}
+
+func (f *fakeClient) HasCapability(name string) bool {
+	for _, c := range f.capabilities {
+		if c == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeClient) EmojiCatalog(_ context.Context) (map[string]apronws.EmojiEntry, error) {
+	return f.emojiCatalog, nil
 }
 
 func (f *fakeClient) Close() { f.closeCalls++ }

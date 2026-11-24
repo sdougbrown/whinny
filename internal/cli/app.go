@@ -164,6 +164,19 @@ func App(d Deps) *clicontract.App {
 				Handle: RoomsHandler(d),
 			},
 			{
+				Name:        "reactions",
+				Short:       "set the bot's reaction set on a message, or list what the server offers",
+				Positionals: []clicontract.Positional{{Name: "emoji", Variadic: true}},
+				Flags: []clicontract.Flag{
+					{Name: "room", Kind: clicontract.String, Usage: "room id or title the message is in (required to set)"},
+					{Name: "message", Kind: clicontract.String, Usage: "message_id to react to (required to set)"},
+					{Name: "list", Kind: clicontract.Bool, Usage: "report reaction support: capability and custom emoji catalog"},
+					{Name: "json", Kind: clicontract.Bool, Usage: "print the result as JSON"},
+				},
+				Output: clicontract.Output{Mode: clicontract.OutputRaw, SuccessExitCodes: []int{0}},
+				Handle: d.ReactionsHandler,
+			},
+			{
 				Name:  "watch",
 				Short: "manage wake watches",
 				Subcommands: []*clicontract.Command{

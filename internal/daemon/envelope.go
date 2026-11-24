@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sdougbrown/whinny/internal/apronws"
 	"github.com/sdougbrown/whinny/internal/wake"
 	"github.com/sdougbrown/whinny/internal/watch"
 )
@@ -47,6 +48,36 @@ func BuildEnvelope(d wake.Decision, msg wake.Msg) Envelope {
 	b.WriteString("]\n")
 	b.WriteString(msg.Text)
 	return Envelope{Text: b.String(), From: msg.From.UserID}
+}
+
+// ReactionEnvelope builds the wake envelope for a reaction-set push on
+// a message: the header is the standard wake line with kind=reaction
+// and the reacting author, and the body is the reaction set's emoji —
+// one author per line when several sets arrived.
+func ReactionEnvelope(rec apronws.ReactionsRecord) Envelope {
+	var b strings.Builder
+	b.WriteString("[wake kind=reaction room=")
+	b.WriteString(quoteHeader(rec.RoomID))
+	b.WriteString(" from=")
+	b.WriteString(quoteHeader(rec.Reactions[0].From.UserID))
+	b.WriteString(" message_id=")
+	b.WriteString(quoteHeader(rec.MessageID))
+	b.WriteString("]\n")
+	for i, set := range rec.Reactions {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(strings.Join(set.Emojis, " "))
+		if set.From.UserID != "" {
+			b.WriteString(" from ")
+			b.WriteString(set.From.UserID)
+		}
+	}
+	from := ""
+	if len(rec.Reactions) > 0 {
+		from = rec.Reactions[0].From.UserID
+	}
+	return Envelope{Text: b.String(), From: from}
 }
 
 // ExpiryEnvelope builds the wake envelope for a watch that expired

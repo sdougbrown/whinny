@@ -16,13 +16,14 @@ const DefaultHistoryLimit = 50
 
 // historyMessage is one history message's JSON projection.
 type historyMessage struct {
-	MessageID string       `json:"message_id"`
-	LogID     int64        `json:"log_id"`
-	RoomID    string       `json:"room_id"`
-	From      apronws.From `json:"from"`
-	Text      string       `json:"text"`
-	ReplyTo   string       `json:"reply_to,omitempty"`
-	Deleted   bool         `json:"deleted,omitempty"`
+	MessageID string                `json:"message_id"`
+	LogID     int64                 `json:"log_id"`
+	RoomID    string                `json:"room_id"`
+	From      apronws.From          `json:"from"`
+	Text      string                `json:"text"`
+	ReplyTo   string                `json:"reply_to,omitempty"`
+	Deleted   bool                  `json:"deleted,omitempty"`
+	Reactions []apronws.ReactionSet `json:"reactions,omitempty"`
 }
 
 // HistoryHandler runs `whinny history`: it resolves the room, fetches
@@ -66,10 +67,11 @@ func HistoryHandler(d Deps) clicontract.HandleFunc {
 				return nil, err
 			}
 		}
+		reactions := foldReactions(msgs, h.Reactions)
 		if inv.Bools["json"] {
 			out := make([]historyMessage, 0, len(msgs))
 			for _, m := range msgs {
-				out = append(out, projectMessage(m))
+				out = append(out, projectMessage(m, reactions[m.MessageID]))
 			}
 			return out, nil
 		}
@@ -84,6 +86,13 @@ func HistoryHandler(d Deps) clicontract.HandleFunc {
 				text = m.Body.Text
 			}
 			fmt.Fprintf(&b, "%s: %s\n", from, text)
+			for _, set := range reactions[m.MessageID] {
+				who := set.From.Name
+				if who == "" {
+					who = set.From.UserID
+				}
+				fmt.Fprintf(&b, "  %s reacted %s\n", who, strings.Join(set.Emojis, " "))
+			}
 		}
 		return strings.TrimSuffix(b.String(), "\n"), nil
 	}
@@ -115,7 +124,7 @@ func filterByCursor(msgs []apronws.Message, cursorID string, newer bool) ([]apro
 	return out, nil
 }
 
-func projectMessage(m apronws.Message) historyMessage {
+func projectMessage(m apronws.Message, reactions []apronws.ReactionSet) historyMessage {
 	out := historyMessage{
 		MessageID: m.MessageID,
 		LogID:     int64(m.LogID),
@@ -128,6 +137,67 @@ func projectMessage(m apronws.Message) historyMessage {
 	}
 	if m.ReplyTo != nil {
 		out.ReplyTo = m.ReplyTo.MessageID
+	}
+	out.Reactions = reactions
+	return out
+}
+
+// foldReactions folds a history window's reaction records onto the
+// message ids they react to. Each record carries one author's complete
+// set at that log position — an empty set is that author's clear — so
+// the last record naming an author wins; the fold's result is the
+// current sets per message. A record whose message is not in the
+// window is dropped.
+func foldReactions(msgs []apronws.Message, records []apronws.ReactionsRecord) map[string][]apronws.ReactionSet {
+	inWindow := make(map[string]bool, len(msgs))
+	for _, m := range msgs {
+		inWindow[m.MessageID] = true
+	}
+	// The current state is one entry per author: the last record that
+	// names an author carries their whole set, so it simply overwrites.
+	current := make(map[string]map[string]apronws.ReactionSet) // messageID -> userID -> set
+	// order keeps each message's first-appearance author order, so the
+	// projection is deterministic regardless of map iteration.
+	order := make(map[string][]string)
+	for _, rec := range records {
+		if !inWindow[rec.MessageID] {
+			continue
+		}
+		if current[rec.MessageID] == nil {
+			current[rec.MessageID] = make(map[string]apronws.ReactionSet)
+		}
+		for _, set := range rec.Reactions {
+			userID := set.From.UserID
+			if len(set.Emojis) == 0 {
+				// The clear drops the author's state and their order
+				// entry, so a later re-add appends fresh and cannot
+				// leave a stale name in the projection.
+				delete(current[rec.MessageID], userID)
+				for i, id := range order[rec.MessageID] {
+					if id == userID {
+						order[rec.MessageID] = append(order[rec.MessageID][:i], order[rec.MessageID][i+1:]...)
+						break
+					}
+				}
+				continue
+			}
+			if _, seen := current[rec.MessageID][userID]; !seen {
+				order[rec.MessageID] = append(order[rec.MessageID], userID)
+			}
+			current[rec.MessageID][userID] = set
+		}
+	}
+	out := make(map[string][]apronws.ReactionSet)
+	for messageID, authors := range current {
+		sets := make([]apronws.ReactionSet, 0, len(authors))
+		for _, userID := range order[messageID] {
+			if set, ok := authors[userID]; ok {
+				sets = append(sets, set)
+			}
+		}
+		if len(sets) > 0 {
+			out[messageID] = sets
+		}
 	}
 	return out
 }

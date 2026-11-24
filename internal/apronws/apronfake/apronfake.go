@@ -44,6 +44,11 @@ type Conn struct {
 	// YouUserID and YouName are the auth reply's "you" user.
 	YouUserID string
 	YouName   string
+	// ServerExt, when non-nil, rides the server frame's ext field.
+	ServerExt map[string]any
+	// ServerCapabilities replaces the default capability list when
+	// non-nil.
+	ServerCapabilities []string
 }
 
 // Server is a WebSocket server for tests. It accepts connections and
@@ -55,6 +60,8 @@ type Conn struct {
 //     none (the catch-up finds no rooms to replay).
 //   - HistoryByRoom is the history response's messages, keyed by room
 //     id; a missing room yields an empty list.
+//   - ReactionsByRoom is the history response's reactions partition,
+//     keyed by room id; a missing room yields none.
 //   - HistoryGate, when non-nil, blocks the history response until it
 //     is closed: a test holds the replay to simulate a live push
 //     landing between the reconnect and the history response.
@@ -85,6 +92,7 @@ type Server struct {
 
 	JoinedRooms     []map[string]any
 	HistoryByRoom   map[string][]map[string]any
+	ReactionsByRoom map[string][]map[string]any
 	HistoryGate     chan struct{}
 	HistoryGateHit  chan struct{}
 	HistoryFailures int
@@ -247,6 +255,7 @@ func (f *Server) runConn(fc *Conn) {
 				_ = json.Unmarshal(fr.Params, &p)
 				f.mu.Lock()
 				msgs := f.HistoryByRoom[p.RoomID]
+				reactions := f.ReactionsByRoom[p.RoomID]
 				gate := f.HistoryGate
 				fail := f.HistoryFailures > 0
 				if fail {
@@ -268,7 +277,11 @@ func (f *Server) runConn(fc *Conn) {
 					if msgs == nil {
 						msgs = []map[string]any{}
 					}
-					reply, _ := json.Marshal(map[string]any{"id": fr.ID, "result": map[string]any{"messages": msgs, "latest_log_id": "0"}})
+					result := map[string]any{"messages": msgs, "latest_log_id": "0"}
+					if reactions != nil {
+						result["reactions"] = reactions
+					}
+					reply, _ := json.Marshal(map[string]any{"id": fr.ID, "result": result})
 					fc.write(reply)
 				}
 			}
@@ -340,14 +353,22 @@ func (fc *Conn) WaitForClose() error {
 // the server push, waits for the auth request (asserting its shape),
 // and sends the auth reply.
 func (fc *Conn) Handshake(ctx context.Context, ping int) error {
+	caps := fc.ServerCapabilities
+	if caps == nil {
+		caps = []string{"history"}
+	}
+	serverFrame := map[string]any{
+		"apron":        9,
+		"agent":        "fake",
+		"capabilities": caps,
+		"ping":         ping,
+	}
+	if fc.ServerExt != nil {
+		serverFrame["ext"] = fc.ServerExt
+	}
 	if err := fc.SendFrame(map[string]any{
 		"method": "server",
-		"params": map[string]any{
-			"apron":        9,
-			"agent":        "fake",
-			"capabilities": []string{"history"},
-			"ping":         ping,
-		},
+		"params": serverFrame,
 	}); err != nil {
 		return err
 	}

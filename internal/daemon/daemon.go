@@ -343,6 +343,10 @@ func (d *daemon) catchUp(ctx context.Context) {
 // queue flush and shared callbacks) runs after the lock is released so
 // a slow deliverer cannot stall live processing or catch-up.
 func (d *daemon) handleEvent(ctx context.Context, ev LinkEvent, subscribe bool) {
+	if ev.Kind == KindReaction {
+		d.handleReaction(ctx, ev)
+		return
+	}
 	if ev.Kind != KindMessage {
 		return
 	}
@@ -412,6 +416,91 @@ func (d *daemon) processEvent(ctx context.Context, ev LinkEvent, subscribe bool,
 		return d.handleSharedLocked(ctx, m, ev.ImageURL), false
 	}
 	return nil, d.handleResidentLocked(ctx, m, ev.ImageURL, author, authorOK, authorErr)
+}
+
+// handleReaction evaluates one reaction-set event (apron §4.7): a
+// reaction by someone who is neither the bot nor a peer bot, on one of
+// the bot's own messages, wakes the agent (kind=reaction). The event
+// runs on the main loop like a message event, so the room cursor's
+// writes stay in log order; the reacted-to message's author resolves
+// through the reply-author cache (a streamed message is already there;
+// a miss falls back to one bounded History call) outside procMu, like
+// the reply path's lookup. The push carries no body to evaluate —
+// watches never match reactions — so this path is resident-only:
+// shared mode evaluates watches, and none match a reaction.
+func (d *daemon) handleReaction(ctx context.Context, ev LinkEvent) {
+	if d.cfg.Mode == ModeShared || ev.Rec == nil {
+		return
+	}
+	// Only sets by someone outside the firebreak can wake: the bot's
+	// own reaction sets (its own acks) never do, and a peer bot's
+	// neither, matching the self-post firebreak — two bots acking each
+	// other with reactions must not wake each other.
+	var sets []apronws.ReactionSet
+	for _, s := range ev.Rec.Reactions {
+		if s.From.UserID == d.cfg.Self.UserID || d.isPeer(s.From.UserID) {
+			continue
+		}
+		sets = append(sets, s)
+	}
+	if len(sets) == 0 {
+		return
+	}
+	// The cursor pre-check runs before the author lookup (a network
+	// History call on a cache miss): without it, a duplicate — or a
+	// reaction the firebreak filters away, which never advances the
+	// cursor — would replay the lookup on the live loop. The cursor
+	// only moves forward, so an event at or below the cursor now is
+	// one then; the authoritative check-then-act runs under procMu
+	// below, matching the message path.
+	cursor, err := d.store.GetCursor(ctx, ev.RoomID)
+	if err != nil {
+		log.Printf("daemon: get cursor %s: %v", ev.RoomID, err)
+	} else if ev.Cursor <= cursor {
+		return
+	}
+	author, ok, err := d.lookupAuthor(ctx, ev.RoomID, ev.Rec.MessageID)
+	if err != nil || !ok || author != d.cfg.Self.UserID {
+		return
+	}
+	// The envelope carries only the sets that passed the firebreak, so
+	// the wake never names the bot's own (or a peer's) set.
+	rec := *ev.Rec
+	rec.Reactions = sets
+	// The critical section re-checks the cursor and advances it before
+	// the enqueue, so a concurrent wake cannot slip the same reaction
+	// past the dedupe line between the pre-check and this write: the
+	// check-then-act is atomic under procMu, as the message path's is.
+	d.procMu.Lock()
+	cursor, err = d.store.GetCursor(ctx, ev.RoomID)
+	if err != nil {
+		log.Printf("daemon: get cursor %s: %v", ev.RoomID, err)
+	} else if ev.Cursor <= cursor {
+		d.procMu.Unlock()
+		return
+	}
+	if err := d.store.SetCursor(ctx, ev.RoomID, ev.Cursor); err != nil {
+		log.Printf("daemon: set cursor %s: %v", ev.RoomID, err)
+	}
+	payload, err := encodePayload(ReactionEnvelope(rec))
+	if err != nil {
+		log.Printf("daemon: encode wake: %v", err)
+		d.procMu.Unlock()
+		return
+	}
+	if _, err := d.store.EnqueueWake(ctx, store.Wake{Agent: d.cfg.Agent, Payload: payload}, d.now()); err != nil {
+		log.Printf("daemon: enqueue wake: %v", err)
+		d.procMu.Unlock()
+		return
+	}
+	d.procMu.Unlock()
+	d.flushQueue(ctx)
+}
+
+// isPeer reports whether userID names a peer bot in the config's peers
+// map (a peer's IsBot flag; a human peer is not a bot).
+func (d *daemon) isPeer(userID string) bool {
+	return wake.IsBot(d.cfg.Peers, userID)
 }
 
 // subscribeOwnThread arms a subscription watch on the thread the bot

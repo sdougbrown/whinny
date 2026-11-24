@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -47,6 +49,12 @@ type Client struct {
 	// read loop; keep it short and non-blocking.
 	onReconnect func()
 
+	// http is the HTTP client the one HTTP fetch the client makes (the
+	// ext:emoji catalog) uses; nil uses http.DefaultClient.
+	httpDoer interface {
+		Do(*http.Request) (*http.Response, error)
+	}
+
 	mu     sync.Mutex
 	live   *live
 	authed bool
@@ -55,7 +63,14 @@ type Client struct {
 	token   string
 	server  ServerInfo
 	pending map[string]*pending
-	idSeq   uint64
+	// idPrefix distinguishes the clients of one process sharing an
+	// apron account. The server deduplicates request ids per user
+	// across connections (§1.2), and id-suffix uniqueness cannot reach
+	// across processes, so Connect seeds idPrefix with the process's
+	// start time: two whinny processes (the daemon and a CLI command)
+	// never reuse one id with a different request fingerprint.
+	idPrefix uint64
+	idSeq    uint64
 
 	records chan Record
 }
@@ -77,6 +92,7 @@ func Connect(ctx context.Context, opts Options) (*Client, error) {
 		url:         wsURL(opts.URL),
 		onReconnect: opts.OnReconnect,
 		pending:     make(map[string]*pending),
+		idPrefix:    uint64(time.Now().UnixNano()) & 0x7fff_ffff_ffff,
 		records:     make(chan Record, 256),
 	}
 	c.ctx, c.cancel = context.WithCancel(ctx)
@@ -118,6 +134,102 @@ func (c *Client) Server() ServerInfo {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.server
+}
+
+// Capabilities returns the server frame's capability list (§3.1).
+func (c *Client) Capabilities() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.server.Capabilities
+}
+
+// HasCapability reports whether the server offered the named capability.
+func (c *Client) HasCapability(name string) bool {
+	for _, cap := range c.Capabilities() {
+		if cap == name {
+			return true
+		}
+	}
+	return false
+}
+
+// EmojiCatalog fetches the custom emoji catalog (ext:emoji): a JSON
+// object keyed by :name:, each entry {url, width, height, alt}. When
+// the server does not offer ext:emoji (no section in the server frame's
+// ext), it returns an empty catalog and nil.
+func (c *Client) EmojiCatalog(ctx context.Context) (map[string]EmojiEntry, error) {
+	ext := func() json.RawMessage {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.server.Ext
+	}()
+	var frame struct {
+		Emoji *struct {
+			CatalogURL string `json:"catalog_url"`
+		} `json:"emoji"`
+	}
+	if len(ext) > 0 && json.Unmarshal(ext, &frame) == nil && frame.Emoji != nil {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, frame.Emoji.CatalogURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		// A dedicated client, not http.DefaultClient: redirects stay
+		// on the catalog's own host and scheme (a downgrade to http or
+		// a hop to another host refuses), and the fetch cannot hang
+		// past 30s.
+		doer := c.httpDoer
+		if doer == nil {
+			doer = &http.Client{
+				Timeout: 30 * time.Second,
+				CheckRedirect: func(req *http.Request, via []*http.Request) error {
+					if req.URL.Scheme != catalogSchemeFor(frame.Emoji.CatalogURL) || req.URL.Host != catalogHost(frame.Emoji.CatalogURL) {
+						return fmt.Errorf("refusing catalog redirect off %s", catalogHost(frame.Emoji.CatalogURL))
+					}
+					return nil
+				},
+			}
+		}
+		resp, err := doer.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("emoji catalog: http %d", resp.StatusCode)
+		}
+		var catalog map[string]EmojiEntry
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&catalog); err != nil {
+			return nil, err
+		}
+		return catalog, nil
+	}
+	return map[string]EmojiEntry{}, nil
+}
+
+// catalogSchemeFor returns the scheme of a catalog URL.
+func catalogSchemeFor(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Scheme
+}
+
+// catalogHost returns the host of a catalog URL.
+func catalogHost(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Host
+}
+
+// EmojiEntry is one custom emoji's catalog entry.
+type EmojiEntry struct {
+	URL    string `json:"url"`
+	Width  int    `json:"width,omitempty"`
+	Height int    `json:"height,omitempty"`
+	Alt    string `json:"alt,omitempty"`
 }
 
 // Send issues a request and waits for its reply. The connection must be
@@ -210,11 +322,14 @@ type HistoryParams struct {
 }
 
 // HistoryResult is the "history" request's result. Raw carries the full
-// result object.
+// result object. Reactions holds the log's reaction records (§4.7),
+// oldest first. Each record carries one author's complete set at that
+// log position; an empty set is that author's clear.
 type HistoryResult struct {
-	Messages    []Message       `json:"messages"`
-	Rooms       json.RawMessage `json:"rooms,omitempty"`
-	LatestLogID LogID           `json:"latest_log_id"`
+	Messages    []Message         `json:"messages"`
+	Reactions   []ReactionsRecord `json:"reactions,omitempty"`
+	Rooms       json.RawMessage   `json:"rooms,omitempty"`
+	LatestLogID LogID             `json:"latest_log_id"`
 	Raw         json.RawMessage
 }
 
@@ -230,6 +345,20 @@ func (c *Client) History(ctx context.Context, p HistoryParams) (HistoryResult, e
 	}
 	r.Raw = raw
 	return r, nil
+}
+
+// SetReactionsParams is the params for the "reactions" request.
+type SetReactionsParams struct {
+	MessageID string   `json:"message_id"`
+	Emojis    []string `json:"emojis"`
+}
+
+// SetReactions sets the caller's complete emoji set on one message
+// (§4.7): an empty slice clears, duplicates collapse, and the server
+// qualifies entries so ones differing only in U+FE0F are the same.
+func (c *Client) SetReactions(ctx context.Context, messageID string, emojis []string) error {
+	_, err := c.Send(ctx, "reactions", SetReactionsParams{MessageID: messageID, Emojis: emojis})
+	return err
 }
 
 // RoomListParams is the params for the "room_list" request.
@@ -641,8 +770,12 @@ func (c *Client) writeFrame(ctx context.Context, conn *websocket.Conn, f wireFra
 	return conn.Write(ctx, websocket.MessageText, data)
 }
 
+// nextID returns a per-client unique request id. Apron deduplicates
+// requests per user across connections (§1.2): two clients sharing an
+// account (the daemon and a CLI command) must not reuse one id with a
+// different fingerprint, so the id carries the per-process prefix.
 func (c *Client) nextID() string {
-	return fmt.Sprintf("w%d", atomic.AddUint64(&c.idSeq, 1))
+	return fmt.Sprintf("w%d-%d", c.idPrefix, atomic.AddUint64(&c.idSeq, 1))
 }
 
 func (c *Client) removePending(id string) {

@@ -16,6 +16,17 @@ type RoomClient interface {
 	RoomList(ctx context.Context, p apronws.RoomListParams) (apronws.RoomListResult, error)
 	CreateThread(ctx context.Context, p apronws.CreateThreadParams) (apronws.Room, error)
 	JoinRoom(ctx context.Context, roomID string) error
+	// SetReactions sets the caller's complete emoji set on one message;
+	// an empty set clears. A transport without reaction support returns
+	// a usage error.
+	SetReactions(ctx context.Context, messageID string, emojis []string) error
+	// HasCapability reports whether the transport's server advertised
+	// the named capability. A transport without a capability list
+	// returns false.
+	HasCapability(name string) bool
+	// EmojiCatalog lists the custom emoji when the transport offers a
+	// catalog; nil or empty when it does not.
+	EmojiCatalog(ctx context.Context) (map[string]apronws.EmojiEntry, error)
 	Close()
 }
 
