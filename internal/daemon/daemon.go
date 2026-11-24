@@ -446,6 +446,18 @@ func (d *daemon) handleReaction(ctx context.Context, ev LinkEvent) {
 	if len(sets) == 0 {
 		return
 	}
+	// The cursor dedupe runs before the author lookup: a lookup is a
+	// network History call on a cache miss, and a duplicate (or a
+	// reaction the firebreak filters away, which never advances the
+	// cursor) would otherwise replay it on the live loop. The
+	// check-then-act is still under procMu, and the cursor only moves
+	// forward, so an event at or below the cursor now is one then.
+	cursor, err := d.store.GetCursor(ctx, ev.RoomID)
+	if err != nil {
+		log.Printf("daemon: get cursor %s: %v", ev.RoomID, err)
+	} else if ev.Cursor <= cursor {
+		return
+	}
 	author, ok, err := d.lookupAuthor(ctx, ev.RoomID, ev.Rec.MessageID)
 	if err != nil || !ok || author != d.cfg.Self.UserID {
 		return
@@ -455,13 +467,6 @@ func (d *daemon) handleReaction(ctx context.Context, ev LinkEvent) {
 	rec := *ev.Rec
 	rec.Reactions = sets
 	d.procMu.Lock()
-	cursor, err := d.store.GetCursor(ctx, ev.RoomID)
-	if err != nil {
-		log.Printf("daemon: get cursor %s: %v", ev.RoomID, err)
-	} else if ev.Cursor <= cursor {
-		d.procMu.Unlock()
-		return
-	}
 	if err := d.store.SetCursor(ctx, ev.RoomID, ev.Cursor); err != nil {
 		log.Printf("daemon: set cursor %s: %v", ev.RoomID, err)
 	}

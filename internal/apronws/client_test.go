@@ -504,6 +504,3 @@ func TestNextIDUniqueAcrossClients(t *testing.T) {
 		t.Error("one client repeated a request id")
 	}
 }
-
-// clients collects each Connect's client for the prefix assertions.
-var clients []*Client

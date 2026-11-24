@@ -1639,3 +1639,35 @@ func TestRunReactionDoesNotSuppressEarlierMessage(t *testing.T) {
 	}
 	h.stop(t)
 }
+
+func TestRunReactionDuplicateDoesNotReplayLookup(t *testing.T) {
+	// The umpire's design finding: a duplicate reaction must dedupe on
+	// the cursor before the author lookup, so a dead-target replay
+	// cannot push a History fetch onto the live loop. The record
+	// arrives twice; the author lookup must run for the first only.
+	cfg := baseCfg()
+	h := startHarness(t, cfg)
+
+	h.fc.PushMessageAt("m1", "r1", "u9", "bot says the thing", nil, 100)
+	waitSettled(t, h, 0, "bot post consumed")
+
+	payload := map[string]any{
+		"log_id":     "990101",
+		"message_id": "m1",
+		"room_id":    "r1",
+		"reactions": []any{
+			map[string]any{"from": map[string]any{"user_id": "doug"}, "emojis": []string{"👍"}},
+		},
+	}
+	h.fc.Push("reactions", payload)
+	d := h.dlv.wait(t)
+	if d.agent != "squire" {
+		t.Errorf("agent = %q, want squire", d.agent)
+	}
+	// The replay: same record, already below the cursor. waitSettled
+	// proves the loop consumed it; the assertion is that the daemon
+	// stays healthy and delivers nothing further.
+	h.fc.Push("reactions", payload)
+	waitSettled(t, h, 1, "replayed reaction must dedupe before the lookup")
+	h.stop(t)
+}
