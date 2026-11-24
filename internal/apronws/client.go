@@ -292,9 +292,9 @@ type HistoryParams struct {
 }
 
 // HistoryResult is the "history" request's result. Raw carries the full
-// result object. Reactions is the log's reaction-set records (§4.7),
-// oldest first; each carries one author's complete set at that log
-// position, an empty set being that author's clear.
+// result object. Reactions holds the log's reaction records (§4.7),
+// oldest first. Each record carries one author's complete set at that
+// log position; an empty set is that author's clear.
 type HistoryResult struct {
 	Messages    []Message         `json:"messages"`
 	Reactions   []ReactionsRecord `json:"reactions,omitempty"`

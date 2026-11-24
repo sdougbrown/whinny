@@ -28,7 +28,7 @@ const historyProbeLimit = 50
 // message — an empty argument list clears. The send-path guard chain
 // runs before the connection is opened, and the message's visibility
 // in the target room is checked first: a message_id from another room
-// would fail server-side with an error the caller cannot fix from the
+// fails server-side with an error the caller cannot fix from the
 // message.
 func (d Deps) ReactionsHandler(ctx context.Context, inv clicontract.Invocation, _ io.Writer) (any, error) {
 	if inv.Bools["list"] {

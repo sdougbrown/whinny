@@ -142,12 +142,11 @@ func projectMessage(m apronws.Message, reactions []apronws.ReactionSet) historyM
 	return out
 }
 
-// foldReactions folds a history window's reaction-set records onto the
-// message ids they react to, in log order: each record carries one
-// author's complete set at that position, so a later record from the
-// same author replaces their earlier one — the fold's result is the
-// current sets per message. A record whose message is not in the
-// window is dropped.
+// foldReactions folds a history window's reaction records onto the
+// message ids they react to. Each record carries one author's complete
+// set at that log position, so a later record from the same author
+// replaces their earlier one; the fold's result is the current sets
+// per message. A record whose message is not in the window is dropped.
 func foldReactions(msgs []apronws.Message, records []apronws.ReactionsRecord) map[string][]apronws.ReactionSet {
 	inWindow := make(map[string]bool, len(msgs))
 	for _, m := range msgs {
