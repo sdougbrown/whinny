@@ -16,13 +16,14 @@ const DefaultHistoryLimit = 50
 
 // historyMessage is one history message's JSON projection.
 type historyMessage struct {
-	MessageID string       `json:"message_id"`
-	LogID     int64        `json:"log_id"`
-	RoomID    string       `json:"room_id"`
-	From      apronws.From `json:"from"`
-	Text      string       `json:"text"`
-	ReplyTo   string       `json:"reply_to,omitempty"`
-	Deleted   bool         `json:"deleted,omitempty"`
+	MessageID string                `json:"message_id"`
+	LogID     int64                 `json:"log_id"`
+	RoomID    string                `json:"room_id"`
+	From      apronws.From          `json:"from"`
+	Text      string                `json:"text"`
+	ReplyTo   string                `json:"reply_to,omitempty"`
+	Deleted   bool                  `json:"deleted,omitempty"`
+	Reactions []apronws.ReactionSet `json:"reactions,omitempty"`
 }
 
 // HistoryHandler runs `whinny history`: it resolves the room, fetches
@@ -66,10 +67,11 @@ func HistoryHandler(d Deps) clicontract.HandleFunc {
 				return nil, err
 			}
 		}
+		reactions := foldReactions(msgs, h.Reactions)
 		if inv.Bools["json"] {
 			out := make([]historyMessage, 0, len(msgs))
 			for _, m := range msgs {
-				out = append(out, projectMessage(m))
+				out = append(out, projectMessage(m, reactions[m.MessageID]))
 			}
 			return out, nil
 		}
@@ -84,6 +86,13 @@ func HistoryHandler(d Deps) clicontract.HandleFunc {
 				text = m.Body.Text
 			}
 			fmt.Fprintf(&b, "%s: %s\n", from, text)
+			for _, set := range reactions[m.MessageID] {
+				who := set.From.Name
+				if who == "" {
+					who = set.From.UserID
+				}
+				fmt.Fprintf(&b, "  %s reacted %s\n", who, strings.Join(set.Emojis, " "))
+			}
 		}
 		return strings.TrimSuffix(b.String(), "\n"), nil
 	}
@@ -115,7 +124,7 @@ func filterByCursor(msgs []apronws.Message, cursorID string, newer bool) ([]apro
 	return out, nil
 }
 
-func projectMessage(m apronws.Message) historyMessage {
+func projectMessage(m apronws.Message, reactions []apronws.ReactionSet) historyMessage {
 	out := historyMessage{
 		MessageID: m.MessageID,
 		LogID:     int64(m.LogID),
@@ -128,6 +137,59 @@ func projectMessage(m apronws.Message) historyMessage {
 	}
 	if m.ReplyTo != nil {
 		out.ReplyTo = m.ReplyTo.MessageID
+	}
+	out.Reactions = reactions
+	return out
+}
+
+// foldReactions folds a history window's reaction-set records onto the
+// message ids they react to, in log order: each record carries one
+// author's complete set at that position, so a later record from the
+// same author replaces their earlier one — the fold's result is the
+// current sets per message. A record whose message is not in the
+// window is dropped.
+func foldReactions(msgs []apronws.Message, records []apronws.ReactionsRecord) map[string][]apronws.ReactionSet {
+	inWindow := make(map[string]bool, len(msgs))
+	for _, m := range msgs {
+		inWindow[m.MessageID] = true
+	}
+	// An author's complete set replaces their previous one: track per
+	// (message, author) position in each message's slice.
+	index := make(map[string]map[string]int) // messageID -> userID -> slice position
+	out := make(map[string][]apronws.ReactionSet)
+	for _, rec := range records {
+		if !inWindow[rec.MessageID] {
+			continue
+		}
+		if index[rec.MessageID] == nil {
+			index[rec.MessageID] = make(map[string]int)
+			out[rec.MessageID] = nil
+		}
+		for _, set := range rec.Reactions {
+			if pos, ok := index[rec.MessageID][set.From.UserID]; ok && pos < len(out[rec.MessageID]) && out[rec.MessageID][pos].From.UserID == set.From.UserID {
+				// Same author, later complete set: replace in place;
+				// an empty set removes their entry.
+				if len(set.Emojis) == 0 {
+					sets := out[rec.MessageID]
+					out[rec.MessageID] = append(sets[:pos], sets[pos+1:]...)
+					index[rec.MessageID][set.From.UserID] = 0
+					delete(index[rec.MessageID], set.From.UserID)
+				} else {
+					out[rec.MessageID][pos] = set
+				}
+				continue
+			}
+			if len(set.Emojis) == 0 {
+				continue
+			}
+			index[rec.MessageID][set.From.UserID] = len(out[rec.MessageID])
+			out[rec.MessageID] = append(out[rec.MessageID], set)
+		}
+	}
+	for id, sets := range out {
+		if len(sets) == 0 {
+			delete(out, id)
+		}
 	}
 	return out
 }

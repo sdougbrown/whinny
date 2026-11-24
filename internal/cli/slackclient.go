@@ -150,6 +150,20 @@ func (c *SlackClient) CreateThread(_ context.Context, _ apronws.CreateThreadPara
 // requires no join.
 func (c *SlackClient) JoinRoom(_ context.Context, _ string) error { return nil }
 
+// SetReactions is a usage error for v1: Slack's reactions.add takes
+// Slack-specific emoji names (shortcodes), not Unicode, and the
+// Unicode-to-name mapping has no Slack-side API surface worth
+// replicating here.
+func (c *SlackClient) SetReactions(_ context.Context, _ string, _ []string) error {
+	return UsageErrorf("reactions are not supported on the Slack transport yet")
+}
+
+// EmojiCatalog returns nil: Slack's emoji.list maps names to image
+// URLs, not a reaction catalog in apron's shape.
+func (c *SlackClient) EmojiCatalog(_ context.Context) (map[string]apronws.EmojiEntry, error) {
+	return nil, nil
+}
+
 // Close is a no-op: the Web API client holds no connection.
 func (c *SlackClient) Close() {}
 

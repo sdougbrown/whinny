@@ -43,6 +43,8 @@ const (
 	KindMessage Kind = iota
 	// KindRoomUpdate is a room membership or metadata change.
 	KindRoomUpdate
+	// KindReactions is a message's reaction sets push.
+	KindReactions
 	// KindActivity is an activity push with an open-ended payload.
 	KindActivity
 )
@@ -53,6 +55,7 @@ type Record struct {
 	Kind       Kind
 	Message    *Message
 	RoomUpdate *RoomUpdate
+	Reactions  *ReactionsRecord
 	Activity   *Activity
 }
 
@@ -64,14 +67,18 @@ type ServerInfo struct {
 	// Ping is the keepalive interval the server suggests, in seconds.
 	// Zero when absent; the client then falls back to 30s.
 	Ping time.Duration
+	// Ext is the server frame's ext object, raw; nil when absent. Its
+	// sections (emoji, command_list, ...) are extension-offered.
+	Ext json.RawMessage `json:"ext,omitempty"`
 }
 
 func decodeServerInfo(data []byte) (ServerInfo, error) {
 	var raw struct {
-		Apron        int      `json:"apron"`
-		Agent        string   `json:"agent"`
-		Capabilities []string `json:"capabilities"`
-		Ping         float64  `json:"ping"`
+		Apron        int             `json:"apron"`
+		Agent        string          `json:"agent"`
+		Capabilities []string        `json:"capabilities"`
+		Ping         float64         `json:"ping"`
+		Ext          json.RawMessage `json:"ext"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return ServerInfo{}, err
@@ -80,6 +87,7 @@ func decodeServerInfo(data []byte) (ServerInfo, error) {
 		Apron:        raw.Apron,
 		Agent:        raw.Agent,
 		Capabilities: raw.Capabilities,
+		Ext:          raw.Ext,
 	}
 	if raw.Ping > 0 {
 		info.Ping = time.Duration(raw.Ping * float64(time.Second))
@@ -135,6 +143,23 @@ type Activity struct {
 	Raw json.RawMessage
 }
 
+// ReactionsRecord is one reactions push (§4.7): the complete reaction
+// sets of one message's authors whose set is non-empty.
+type ReactionsRecord struct {
+	LogID     LogID         `json:"log_id"`
+	MessageID string        `json:"message_id"`
+	RoomID    string        `json:"room_id"`
+	Reactions []ReactionSet `json:"reactions"`
+	// Raw carries the full push payload.
+	Raw json.RawMessage `json:"-"`
+}
+
+// ReactionSet is one author's complete emoji set on a message.
+type ReactionSet struct {
+	From   From     `json:"from"`
+	Emojis []string `json:"emojis"`
+}
+
 // decodePush decodes an inbound push. Unknown methods return ok=false;
 // they are ignored, not errors.
 func decodePush(method string, data []byte) (Record, bool) {
@@ -152,6 +177,13 @@ func decodePush(method string, data []byte) (Record, bool) {
 		}
 		ru.Raw = data
 		return Record{Kind: KindRoomUpdate, RoomUpdate: &ru}, true
+	case "reactions":
+		var r ReactionsRecord
+		if err := json.Unmarshal(data, &r); err != nil {
+			return Record{}, false
+		}
+		r.Raw = data
+		return Record{Kind: KindReactions, Reactions: &r}, true
 	case "activity":
 		return Record{Kind: KindActivity, Activity: &Activity{Raw: data}}, true
 	default:

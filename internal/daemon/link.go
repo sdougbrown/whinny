@@ -13,6 +13,11 @@ import (
 // as messages.
 const KindMessage = "message"
 
+// KindReaction is the LinkEvent kind for an inbound reaction-set push
+// on a message. The Msg carries the reacted-to message's id with an
+// empty Text; the reacting author is From.
+const KindReaction = "reaction"
+
 // Link is the room transport the daemon runs over. The daemon is the
 // consumer: it needs inbound message events, posting, history (for
 // catch-up and reply-author lookups), and the room list; everything
@@ -57,6 +62,8 @@ type apronLink struct {
 	// a deleted message's author. The tombstone itself is never
 	// evaluated.
 	tombstoneFeed func(messageID, roomID, author string)
+	// reactionFeed, if set, is called with each reactions push (§4.7).
+	reactionFeed func(rec apronws.ReactionsRecord)
 }
 
 // newApronLink wraps an apron client.
@@ -71,6 +78,12 @@ func (l *apronLink) SetOnReconnect(fn func()) { l.client.SetOnReconnect(fn) }
 // daemon wires it to the reply-author cache).
 func (l *apronLink) SetTombstoneFeed(fn func(messageID, roomID, author string)) {
 	l.tombstoneFeed = fn
+}
+
+// SetReactionFeed sets the callback invoked for reactions pushes (the
+// daemon wires it to the reaction wake path).
+func (l *apronLink) SetReactionFeed(fn func(rec apronws.ReactionsRecord)) {
+	l.reactionFeed = fn
 }
 
 // feedTombstone records a delete tombstone's author (the tombstone is
@@ -99,6 +112,12 @@ func (l *apronLink) Events(ctx context.Context) (<-chan LinkEvent, error) {
 					return
 				}
 				l.feedTombstone(rec)
+				if rec.Kind == apronws.KindReactions {
+					if l.reactionFeed != nil && rec.Reactions != nil {
+						l.reactionFeed(*rec.Reactions)
+					}
+					continue
+				}
 				ev, keep := apronEvent(rec)
 				if !keep {
 					continue

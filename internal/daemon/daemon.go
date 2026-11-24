@@ -219,6 +219,14 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 	}); ok {
 		f.SetTombstoneFeed(d.hist.feed)
 	}
+	// A reactions push (apron §4.7) wakes on a reaction to one of the
+	// bot's own messages; a link without the hook (Slack, a fake)
+	// never sees reaction wakes.
+	if f, ok := d.link.(interface {
+		SetReactionFeed(func(apronws.ReactionsRecord))
+	}); ok {
+		f.SetReactionFeed(func(rec apronws.ReactionsRecord) { d.handleReaction(ctx, rec) })
+	}
 	// The reconnect hook is optional: an apron link forwards it to the
 	// client; a link without the hook simply never replays on reconnect.
 	if r, ok := d.link.(interface{ SetOnReconnect(func()) }); ok {
@@ -412,6 +420,63 @@ func (d *daemon) processEvent(ctx context.Context, ev LinkEvent, subscribe bool,
 		return d.handleSharedLocked(ctx, m, ev.ImageURL), false
 	}
 	return nil, d.handleResidentLocked(ctx, m, ev.ImageURL, author, authorOK, authorErr)
+}
+
+// handleReaction evaluates one reactions push (apron §4.7): a non-self
+// reaction set on one of the bot's own messages wakes the agent
+// (kind=reaction). The reacted-to message's author resolves through the
+// reply-author cache (a streamed message is already there; a miss
+// falls back to one bounded History call), outside procMu like the
+// reply path's lookup. The push carries no body to evaluate — watches
+// never match reactions — so this path is resident-only: shared mode
+// evaluates watches, and none match a reaction.
+func (d *daemon) handleReaction(ctx context.Context, rec apronws.ReactionsRecord) {
+	if d.cfg.Mode == ModeShared {
+		return
+	}
+	// Only sets by someone else can wake: the bot's own reaction sets
+	// (its own acks) never do, matching the self-post firebreak.
+	var sets []apronws.ReactionSet
+	for _, s := range rec.Reactions {
+		if s.From.UserID != d.cfg.Self.UserID {
+			sets = append(sets, s)
+		}
+	}
+	if len(sets) == 0 {
+		return
+	}
+	author, ok, err := d.lookupAuthor(ctx, rec.RoomID, rec.MessageID)
+	if err != nil || !ok || author != d.cfg.Self.UserID {
+		return
+	}
+	// Dedupe against the room cursor (the reactions record's log_id
+	// comes from the same server-wide sequence as message log ids),
+	// then advance it. procMu covers the check-then-act and the
+	// enqueue; delivery runs after the lock is released.
+	d.procMu.Lock()
+	cursor, err := d.store.GetCursor(ctx, rec.RoomID)
+	if err != nil {
+		log.Printf("daemon: get cursor %s: %v", rec.RoomID, err)
+	} else if int64(rec.LogID) <= cursor {
+		d.procMu.Unlock()
+		return
+	}
+	if err := d.store.SetCursor(ctx, rec.RoomID, int64(rec.LogID)); err != nil {
+		log.Printf("daemon: set cursor %s: %v", rec.RoomID, err)
+	}
+	payload, err := encodePayload(ReactionEnvelope(rec))
+	if err != nil {
+		log.Printf("daemon: encode wake: %v", err)
+		d.procMu.Unlock()
+		return
+	}
+	if _, err := d.store.EnqueueWake(ctx, store.Wake{Agent: d.cfg.Agent, Payload: payload}, d.now()); err != nil {
+		log.Printf("daemon: enqueue wake: %v", err)
+		d.procMu.Unlock()
+		return
+	}
+	d.procMu.Unlock()
+	d.flushQueue(ctx)
 }
 
 // subscribeOwnThread arms a subscription watch on the thread the bot

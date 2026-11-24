@@ -1,6 +1,9 @@
 package apronws
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestDecodePush(t *testing.T) {
 	tests := []struct {
@@ -157,5 +160,75 @@ func TestDecodePush(t *testing.T) {
 				tt.check(t, rec)
 			}
 		})
+	}
+}
+
+func TestDecodePushReactions(t *testing.T) {
+	data := `{"log_id":42,"message_id":"m1","room_id":"r1",
+		"reactions":[{"from":{"user_id":"u1","name":"Ann"},"emojis":["👍"]},
+			{"from":{"user_id":"u2"},"emojis":["🎉",":party:"]}]}`
+	rec, ok := decodePush("reactions", []byte(data))
+	if !ok {
+		t.Fatal("decodePush(reactions) returned ok=false")
+	}
+	if rec.Kind != KindReactions {
+		t.Fatalf("Kind = %v, want KindReactions", rec.Kind)
+	}
+	r := rec.Reactions
+	if r == nil {
+		t.Fatal("Reactions = nil")
+	}
+	if r.LogID != 42 || r.MessageID != "m1" || r.RoomID != "r1" {
+		t.Errorf("LogID/MessageID/RoomID = %d/%q/%q, want 42/m1/r1", r.LogID, r.MessageID, r.RoomID)
+	}
+	if len(r.Reactions) != 2 {
+		t.Fatalf("len(Reactions) = %d, want 2", len(r.Reactions))
+	}
+	if r.Reactions[0].From.UserID != "u1" || len(r.Reactions[0].Emojis) != 1 || r.Reactions[0].Emojis[0] != "👍" {
+		t.Errorf("Reactions[0] = %+v, want u1/👍", r.Reactions[0])
+	}
+	if r.Reactions[1].Emojis[1] != ":party:" {
+		t.Errorf("Reactions[1].Emojis = %v, want :party: kept", r.Reactions[1].Emojis)
+	}
+	if string(r.Raw) == "" {
+		t.Error("Raw not set")
+	}
+}
+
+func TestDecodePushReactionsMalformed(t *testing.T) {
+	if _, ok := decodePush("reactions", []byte(`{"log_id":"not-a-number"}`)); ok {
+		t.Error("malformed reactions push decoded ok")
+	}
+	if _, ok := decodePush("reactions", []byte(`not json`)); ok {
+		t.Error("non-JSON reactions push decoded ok")
+	}
+}
+
+func TestDecodeHistoryReactions(t *testing.T) {
+	// A history reply's reactions partition decodes into
+	// HistoryResult.Reactions: each record is one author's complete
+	// set at that log position, oldest first.
+	raw := []byte(`{
+		"messages": [{"message_id":"m1","log_id":"10","room_id":"r1","from":{"user_id":"u1"}}],
+		"reactions": [{"log_id":"11","message_id":"m1","room_id":"r1",
+			"reactions":[{"from":{"user_id":"u2","name":"Ann"},"emojis":["👍"]}]}],
+		"latest_log_id": "11"
+	}`)
+	var r HistoryResult
+	if err := json.Unmarshal(raw, &r); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(r.Reactions) != 1 {
+		t.Fatalf("reactions = %d, want 1", len(r.Reactions))
+	}
+	rec := r.Reactions[0]
+	if rec.MessageID != "m1" || rec.LogID != 11 || rec.RoomID != "r1" {
+		t.Errorf("record = %+v, want m1/11/r1", rec)
+	}
+	if len(rec.Reactions) != 1 || rec.Reactions[0].From.UserID != "u2" || rec.Reactions[0].Emojis[0] != "👍" {
+		t.Errorf("sets = %+v, want u2/👍", rec.Reactions)
+	}
+	if len(r.Messages) != 1 {
+		t.Errorf("messages = %d, want 1", len(r.Messages))
 	}
 }

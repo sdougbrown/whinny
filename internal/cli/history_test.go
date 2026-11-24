@@ -84,3 +84,34 @@ func TestHistoryLimitDefault(t *testing.T) {
 		t.Fatalf("Limit = %d, want the 50 default", got)
 	}
 }
+
+func TestHistoryReactionsAttached(t *testing.T) {
+	d, c := historyDeps()
+	c.history.Reactions = []apronws.ReactionsRecord{
+		{MessageID: "m1", LogID: 10, RoomID: "r1", Reactions: []apronws.ReactionSet{
+			{From: apronws.From{UserID: "u2", Name: "bob"}, Emojis: []string{"👍"}},
+		}},
+	}
+	res, err := HistoryHandler(d)(context.Background(),
+		inv("history", nil, map[string]string{"room": "r1"}, map[string]bool{"json": true}), io.Discard)
+	if err != nil {
+		t.Fatalf("HistoryHandler: %v", err)
+	}
+	msgs := res.([]historyMessage)
+	if len(msgs[0].Reactions) != 1 || msgs[0].Reactions[0].From.UserID != "u2" {
+		t.Fatalf("m1 reactions = %+v, want bob's set", msgs[0].Reactions)
+	}
+	if len(msgs[1].Reactions) != 0 {
+		t.Errorf("m2 reactions = %+v, want none", msgs[1].Reactions)
+	}
+	// Text mode: the reacting author and emoji ride the message line.
+	res, err = HistoryHandler(d)(context.Background(),
+		inv("history", nil, map[string]string{"room": "r1"}, nil), io.Discard)
+	if err != nil {
+		t.Fatalf("HistoryHandler text: %v", err)
+	}
+	text := res.(string)
+	if !strings.Contains(text, "bob reacted 👍") {
+		t.Errorf("text = %q, want a bob reacted line", text)
+	}
+}

@@ -10,6 +10,8 @@
 #      file, doug-e2e mapped as a human peer
 #   5. the human mentions the bot in the seeded general room; assert a
 #      kind=mention wake with the message text reaches the sink
+#   5b. the bot sets a reaction through the CLI send path, the human
+#       reacts to the bot's message; assert a kind=reaction wake
 #   6. register a watch, the human matches it; assert a kind=watch wake
 #   7. register a second watch that never matches; assert its
 #      kind=watch-expired wake after the ttl
@@ -144,6 +146,23 @@ grep -q "from=doug-e2e" "$SINK_FILE" || fail "mention envelope missing from=doug
 grep -q "can you look at the roster" "$SINK_FILE" || fail "mention envelope missing the message text"
 log "PASS: mention wake envelope carries the header and the roster text"
 
+# --- 5b. reactions ----------------------------------------------------------
+# The bot reacts to the human's mention through the CLI send path (the
+# guard chain runs), then the human reacts to a bot message and the
+# daemon delivers a kind=reaction wake.
+HUMAN_MSG_ID="$(grep -o 'message_id=[^ ]*' "$SINK_FILE" | tail -1 | sed 's/^message_id=//;s/]$//')"
+[[ -n "$HUMAN_MSG_ID" ]] || fail "could not extract the mention's message_id from the sink"
+"$WORK/whinny" reactions "👍" --room general --message "$HUMAN_MSG_ID" >/dev/null \
+  || fail "bot reactions command failed"
+log "PASS: bot set 👍 on the human's message"
+BOT_POST="$("$WORK/whinny" post --room general "roster review starting" --json 2>"$WORK/post.err")"   || { cat "$WORK/post.err" >&2; fail "bot post for the reaction target failed"; }
+BOT_MSG_ID="$(printf '%s' "$BOT_POST" | python3 -c 'import json,sys; print(json.load(sys.stdin)["message_id"])')"
+"$WORK/aprontool" react --url "$URL" --token "$HUMAN_TOKEN" --message "$BOT_MSG_ID" \
+  --emoji "🎉" >/dev/null || fail "human react failed"
+await_envelope "kind=reaction" 30 "reaction wake"
+grep -q "🎉 from doug-e2e" "$SINK_FILE" || fail "reaction envelope missing the emoji and author"
+log "PASS: reaction wake envelope carries the emoji and the author"
+
 # --- 6. watch wake ----------------------------------------------------------
 "$WORK/whinny" watch add --room general --pattern "deploy done" \
   --note "waiting for deploy" --ttl 30s >/dev/null
@@ -175,8 +194,10 @@ grep -q "refused-quiet" "$WORK/post.out" "$WORK/post.err" \
 log "PASS: quiet post refused with refused-quiet"
 WHINNY_TOKEN="$HUMAN_TOKEN" "$WORK/whinny" history --room general --json \
   >"$WORK/history.json"
-if grep -q '"user_id": "whinny-e2e"' "$WORK/history.json"; then
-  fail "history shows a message from the bot despite quiet"
+# The bot's pre-quiet messages (the roster reaction's author and its
+# own post) are legitimately in history; quiet only gates new sends.
+if grep -q '"text": "hello from the bot"' "$WORK/history.json"; then
+  fail "history shows the quiet-gated post despite the refusal"
 fi
 log "PASS: history (as the human) shows no message from the bot"
 

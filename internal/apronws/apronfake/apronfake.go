@@ -44,6 +44,11 @@ type Conn struct {
 	// YouUserID and YouName are the auth reply's "you" user.
 	YouUserID string
 	YouName   string
+	// ServerExt, when non-nil, rides the server frame's ext field.
+	ServerExt map[string]any
+	// ServerCapabilities replaces the default capability list when
+	// non-nil.
+	ServerCapabilities []string
 }
 
 // Server is a WebSocket server for tests. It accepts connections and
@@ -340,14 +345,22 @@ func (fc *Conn) WaitForClose() error {
 // the server push, waits for the auth request (asserting its shape),
 // and sends the auth reply.
 func (fc *Conn) Handshake(ctx context.Context, ping int) error {
+	caps := fc.ServerCapabilities
+	if caps == nil {
+		caps = []string{"history"}
+	}
+	serverFrame := map[string]any{
+		"apron":        9,
+		"agent":        "fake",
+		"capabilities": caps,
+		"ping":         ping,
+	}
+	if fc.ServerExt != nil {
+		serverFrame["ext"] = fc.ServerExt
+	}
 	if err := fc.SendFrame(map[string]any{
 		"method": "server",
-		"params": map[string]any{
-			"apron":        9,
-			"agent":        "fake",
-			"capabilities": []string{"history"},
-			"ping":         ping,
-		},
+		"params": serverFrame,
 	}); err != nil {
 		return err
 	}

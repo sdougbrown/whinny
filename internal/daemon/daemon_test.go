@@ -1498,3 +1498,52 @@ func TestClientWithSlackTransportRejected(t *testing.T) {
 		t.Errorf("Run = %v, want the client-with-slack rejection", err)
 	}
 }
+
+func TestRunReactionWake(t *testing.T) {
+	cfg := baseCfg()
+	h := startHarness(t, cfg)
+
+	// The bot posts; its own post arms the thread subscription and
+	// advances the cursor without waking.
+	h.fc.PushMessage("m1", "r1", "u9", "bot says the thing", nil)
+	waitSettled(t, h, 0, "bot's own post must not wake")
+
+	// A human reacts to the bot's message: kind=reaction wakes.
+	h.fc.Push("reactions", map[string]any{
+		"log_id":     time.Now().UnixNano(),
+		"message_id": "m1",
+		"room_id":    "r1",
+		"reactions": []any{
+			map[string]any{"from": map[string]any{"user_id": "doug", "name": "Doug"}, "emojis": []string{"👍"}},
+		},
+	})
+	d := h.dlv.wait(t)
+	if d.agent != "squire" {
+		t.Errorf("agent = %q, want squire", d.agent)
+	}
+	want := `[wake kind=reaction room=r1 from=doug message_id=m1]` + "\n👍 from doug"
+	if d.env.Text != want {
+		t.Errorf("envelope = %q, want %q", d.env.Text, want)
+	}
+	h.stop(t)
+}
+
+func TestRunReactionSelfIgnored(t *testing.T) {
+	cfg := baseCfg()
+	h := startHarness(t, cfg)
+
+	h.fc.PushMessage("m1", "r1", "u9", "bot says the thing", nil)
+	waitSettled(t, h, 0, "bot's own post must not wake")
+
+	// The bot's own reaction set on its own message is never a wake.
+	h.fc.Push("reactions", map[string]any{
+		"log_id":     time.Now().UnixNano(),
+		"message_id": "m1",
+		"room_id":    "r1",
+		"reactions": []any{
+			map[string]any{"from": map[string]any{"user_id": "u9"}, "emojis": []string{"👀"}},
+		},
+	})
+	waitSettled(t, h, 0, "self reaction must not wake")
+	h.stop(t)
+}

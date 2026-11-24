@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/sdougbrown/whinny/internal/apronws/apronfake"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/sdougbrown/whinny/internal/apronws/apronfake"
 )
 
 func TestConnectHandshake(t *testing.T) {
@@ -297,5 +300,186 @@ func readRecord(t *testing.T, ch <-chan Record, ctx context.Context) Record {
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for record")
 		return Record{}
+	}
+}
+
+func TestSetReactions(t *testing.T) {
+	f := apronfake.New(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	go func() {
+		fc, err := f.WaitConn(1)
+		if err != nil {
+			f.ReportError(err)
+			return
+		}
+		if err := fc.Handshake(ctx, 30); err != nil {
+			f.ReportError(err)
+			return
+		}
+		fr, err := fc.RecvFrame(ctx)
+		if err != nil {
+			f.ReportError(err)
+			return
+		}
+		if fr.Method != "reactions" {
+			f.ReportError(fmt.Errorf("request = %q, want reactions", fr.Method))
+			return
+		}
+		var p struct {
+			MessageID string   `json:"message_id"`
+			Emojis    []string `json:"emojis"`
+		}
+		if err := json.Unmarshal(fr.Params, &p); err != nil {
+			f.ReportError(err)
+			return
+		}
+		if p.MessageID != "m1" {
+			f.ReportError(fmt.Errorf("message_id = %q, want m1", p.MessageID))
+			return
+		}
+		want := []string{"👍", ":party:"}
+		if len(p.Emojis) != len(want) || p.Emojis[0] != want[0] || p.Emojis[1] != want[1] {
+			f.ReportError(fmt.Errorf("emojis = %v, want %v", p.Emojis, want))
+			return
+		}
+		if err := fc.SendFrame(map[string]any{"id": fr.ID, "result": map[string]any{}}); err != nil {
+			f.ReportError(err)
+		}
+	}()
+
+	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer c.Close()
+
+	if err := c.SetReactions(ctx, "m1", []string{"👍", ":party:"}); err != nil {
+		t.Fatalf("SetReactions: %v", err)
+	}
+}
+
+func TestCapabilitiesAndEmojiCatalog(t *testing.T) {
+	// The catalog is served over HTTP; point catalog_url at a local
+	// test server and let the client fetch it.
+	catalog := map[string]any{
+		":party:": map[string]any{"url": "http://emoji.test/party.png", "width": 32, "height": 32},
+		":owl:":   map[string]any{"url": "http://emoji.test/owl.png", "alt": "an owl"},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(catalog)
+	}))
+	defer srv.Close()
+
+	f := apronfake.New(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	go func() {
+		fc, err := f.WaitConn(1)
+		if err != nil {
+			f.ReportError(err)
+			return
+		}
+		fc.ServerCapabilities = []string{"history", "reactions"}
+		fc.ServerExt = map[string]any{
+			"emoji": map[string]any{"catalog_url": srv.URL},
+		}
+		if err := fc.Handshake(ctx, 30); err != nil {
+			f.ReportError(err)
+		}
+	}()
+
+	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer c.Close()
+
+	if !c.HasCapability("reactions") {
+		t.Error("HasCapability(reactions) = false, want true")
+	}
+	if c.HasCapability("ext:emoji") {
+		t.Error("HasCapability(ext:emoji) = true, want false (not advertised)")
+	}
+
+	got, err := c.EmojiCatalog(ctx)
+	if err != nil {
+		t.Fatalf("EmojiCatalog: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("catalog = %v, want 2 entries", got)
+	}
+	if got[":party:"].URL != "http://emoji.test/party.png" || got[":party:"].Width != 32 {
+		t.Errorf(":party: entry = %+v", got[":party:"])
+	}
+	if got[":owl:"].Alt != "an owl" {
+		t.Errorf(":owl: entry = %+v", got[":owl:"])
+	}
+}
+
+func TestEmojiCatalogWithoutExt(t *testing.T) {
+	f := apronfake.New(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	go func() {
+		fc, err := f.WaitConn(1)
+		if err != nil {
+			f.ReportError(err)
+			return
+		}
+		if err := fc.Handshake(ctx, 30); err != nil {
+			f.ReportError(err)
+		}
+	}()
+
+	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer c.Close()
+
+	got, err := c.EmojiCatalog(ctx)
+	if err != nil {
+		t.Fatalf("EmojiCatalog: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("catalog = %v, want empty", got)
+	}
+	if c.HasCapability("reactions") {
+		t.Error("HasCapability(reactions) = true, want false")
+	}
+}
+
+func TestNextIDUniqueAcrossClients(t *testing.T) {
+	// Two clients sharing an apron account must never reuse a request
+	// id (§1.2 dedup is per user): the ids differ across instances.
+	f := apronfake.New(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() {
+		fc, err := f.WaitConn(1)
+		if err != nil {
+			f.ReportError(err)
+			return
+		}
+		if err := fc.Handshake(ctx, 30); err != nil {
+			f.ReportError(err)
+		}
+	}()
+	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer c.Close()
+	other := &Client{pending: make(map[string]*pending), idPrefix: c.idPrefix + 1}
+	if c.nextID() == other.nextID() {
+		t.Error("two clients produced the same first request id")
+	}
+	if c.nextID() == c.nextID() {
+		t.Error("one client repeated a request id")
 	}
 }

@@ -6,6 +6,7 @@
 //
 //	aprontool enroll --url ws://host/ws --email E --user-id U --name N --log PATH
 //	aprontool say    --url ws://host/ws --token T --room R --text S [--mention M]...
+//	aprontool react  --url ws://host/ws --token T --message M [--emoji E]...
 //
 // enroll runs the email sign-in ceremony (propose, read the six-digit
 // code from the server's log — aprond --email.sender log writes codes
@@ -123,6 +124,8 @@ func run(args []string) int {
 		err = enroll(args[1:])
 	case "say":
 		err = say(args[1:])
+	case "react":
+		err = react(args[1:])
 	default:
 		usagef("unknown subcommand %q", args[0])
 		return 2
@@ -263,6 +266,47 @@ func say(args []string) error {
 	result, err := p.call("message", map[string]any{"room_id": *room, "body": body})
 	if err != nil {
 		return fmt.Errorf("say: message: %w", err)
+	}
+	fmt.Println(strings.TrimRight(string(bytes.TrimSpace(result)), "\n"))
+	return nil
+}
+
+// react resumes a session and sets one reactions frame (§4.7): the
+// caller's complete emoji set on one message.
+func react(args []string) error {
+	fs := flag.NewFlagSet("react", flag.ContinueOnError)
+	url := fs.String("url", "", "apron WebSocket endpoint")
+	token := fs.String("token", "", "session token to resume")
+	message := fs.String("message", "", "message_id to react to")
+	var emojis []string
+	fs.Func("emoji", "emoji entry to set (repeatable; none clears)", func(v string) error {
+		emojis = append(emojis, v)
+		return nil
+	})
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *url == "" || *token == "" || *message == "" {
+		return errors.New("react: --url, --token, and --message are required")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	p, err := dial(ctx, *url)
+	if err != nil {
+		return err
+	}
+	defer p.close()
+
+	if _, err := p.call("auth", map[string]any{"scheme": "token", "token": *token}); err != nil {
+		return fmt.Errorf("react: auth: %w", err)
+	}
+	if emojis == nil {
+		emojis = []string{}
+	}
+	result, err := p.call("reactions", map[string]any{"message_id": *message, "emojis": emojis})
+	if err != nil {
+		return fmt.Errorf("react: reactions: %w", err)
 	}
 	fmt.Println(strings.TrimRight(string(bytes.TrimSpace(result)), "\n"))
 	return nil
