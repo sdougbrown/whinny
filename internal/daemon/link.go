@@ -31,8 +31,9 @@ type Link interface {
 	// Post sends text to a room, optionally as a reply; returns the
 	// message id.
 	Post(ctx context.Context, roomID, text, replyTo string) (string, error)
-	// History returns message events for a room strictly newer than
-	// after (a cursor; 0 = from the start), oldest first, capped.
+	// History returns message and reaction events for a room strictly
+	// newer than after (a cursor; 0 = from the start), oldest first,
+	// capped. Reaction events carry the full record in Rec.
 	History(ctx context.Context, roomID string, after int64, limit int) ([]LinkEvent, error)
 	// Rooms lists the rooms the bot is in.
 	Rooms(ctx context.Context) ([]RoomRef, error)
@@ -193,6 +194,16 @@ func (l *apronLink) History(ctx context.Context, roomID string, after int64, lim
 	for i := range res.Messages {
 		rec := apronws.Record{Kind: apronws.KindMessage, Message: &res.Messages[i]}
 		l.feedTombstone(rec)
+		ev, ok := apronEvent(rec)
+		if ok && ev.Cursor > after {
+			out = append(out, ev)
+		}
+	}
+	// The log's reaction records ride the same window: without them a
+	// reaction during a disconnect gap would never wake, while a
+	// mention in the same gap replays through catch-up.
+	for i := range res.Reactions {
+		rec := apronws.Record{Kind: apronws.KindReactions, Reactions: &res.Reactions[i]}
 		ev, ok := apronEvent(rec)
 		if ok && ev.Cursor > after {
 			out = append(out, ev)

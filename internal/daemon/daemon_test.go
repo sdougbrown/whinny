@@ -1671,3 +1671,43 @@ func TestRunReactionDuplicateDoesNotReplayLookup(t *testing.T) {
 	waitSettled(t, h, 1, "replayed reaction must dedupe before the lookup")
 	h.stop(t)
 }
+
+func TestCatchUpReplaysReactionDuringDowntime(t *testing.T) {
+	// The umpire's catch-up finding: a reaction on the bot's message
+	// that lands while the daemon is down must wake, exactly as a
+	// mention in the same gap replays. The cursor is pre-seeded below
+	// both records; the history response carries the reaction record.
+	cfg := baseCfg()
+	h := startHarnessWithSetup(t, cfg, func(h *harness) {
+		if err := h.st.SetCursor(context.Background(), "r1", 100); err != nil {
+			t.Fatalf("set cursor: %v", err)
+		}
+		h.srv.SetCatchUp(
+			[]map[string]any{{"room_id": "r1"}},
+			map[string][]map[string]any{
+				"r1": {{
+					"message_id": "m1", "log_id": 100, "room_id": "r1",
+					"from": map[string]any{"user_id": "u9", "name": "squire"},
+					"body": map[string]any{"text": "bot says the thing"},
+				}},
+			},
+		)
+		h.srv.ReactionsByRoom = map[string][]map[string]any{
+			"r1": {{
+				"log_id": 101, "message_id": "m1", "room_id": "r1",
+				"reactions": []any{
+					map[string]any{"from": map[string]any{"user_id": "doug"}, "emojis": []string{"👍"}},
+				},
+			}},
+		}
+	})
+
+	d := h.dlv.wait(t)
+	if d.agent != "squire" {
+		t.Errorf("agent = %q, want squire", d.agent)
+	}
+	if !strings.Contains(d.env.Text, "kind=reaction") || !strings.Contains(d.env.Text, "👍 from doug") {
+		t.Errorf("envelope = %q, want the replayed reaction wake", d.env.Text)
+	}
+	h.stop(t)
+}

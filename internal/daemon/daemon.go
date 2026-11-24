@@ -446,12 +446,13 @@ func (d *daemon) handleReaction(ctx context.Context, ev LinkEvent) {
 	if len(sets) == 0 {
 		return
 	}
-	// The cursor dedupe runs before the author lookup: a lookup is a
-	// network History call on a cache miss, and a duplicate (or a
+	// The cursor pre-check runs before the author lookup (a network
+	// History call on a cache miss): without it, a duplicate — or a
 	// reaction the firebreak filters away, which never advances the
-	// cursor) would otherwise replay it on the live loop. The
-	// check-then-act is still under procMu, and the cursor only moves
-	// forward, so an event at or below the cursor now is one then.
+	// cursor — would replay the lookup on the live loop. The cursor
+	// only moves forward, so an event at or below the cursor now is
+	// one then; the authoritative check-then-act runs under procMu
+	// below, matching the message path.
 	cursor, err := d.store.GetCursor(ctx, ev.RoomID)
 	if err != nil {
 		log.Printf("daemon: get cursor %s: %v", ev.RoomID, err)
@@ -466,7 +467,18 @@ func (d *daemon) handleReaction(ctx context.Context, ev LinkEvent) {
 	// the wake never names the bot's own (or a peer's) set.
 	rec := *ev.Rec
 	rec.Reactions = sets
+	// The critical section re-checks the cursor and advances it before
+	// the enqueue, so a concurrent wake cannot slip the same reaction
+	// past the dedupe line between the pre-check and this write: the
+	// check-then-act is atomic under procMu, as the message path's is.
 	d.procMu.Lock()
+	cursor, err = d.store.GetCursor(ctx, ev.RoomID)
+	if err != nil {
+		log.Printf("daemon: get cursor %s: %v", ev.RoomID, err)
+	} else if ev.Cursor <= cursor {
+		d.procMu.Unlock()
+		return
+	}
 	if err := d.store.SetCursor(ctx, ev.RoomID, ev.Cursor); err != nil {
 		log.Printf("daemon: set cursor %s: %v", ev.RoomID, err)
 	}
