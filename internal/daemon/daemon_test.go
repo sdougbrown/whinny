@@ -1529,12 +1529,16 @@ func TestRunReactionWake(t *testing.T) {
 	h.stop(t)
 }
 
+// TestRunReactionDedupedByCursor pushes the same reaction record
+// twice: the first wakes, the second dedupes on the cursor before the
+// author lookup, so a replay cannot push a History fetch onto the
+// live loop (the umpire's design finding).
 func TestRunReactionDedupedByCursor(t *testing.T) {
 	cfg := baseCfg()
 	h := startHarness(t, cfg)
 
 	h.fc.PushMessageAt("m1", "r1", "u9", "bot says the thing", nil, 100)
-	waitSettled(t, h, 0, "bot's own post must not wake")
+	waitSettled(t, h, 0, "bot post consumed")
 
 	payload := map[string]any{
 		"log_id":     "990101",
@@ -1549,9 +1553,11 @@ func TestRunReactionDedupedByCursor(t *testing.T) {
 	if d.agent != "squire" {
 		t.Errorf("agent = %q, want squire", d.agent)
 	}
-	// The same record pushed again is deduped by the room cursor.
+	// The replay: same record, already below the cursor. waitSettled
+	// proves the loop consumed it; the assertion is that the daemon
+	// stays healthy and delivers nothing further.
 	h.fc.Push("reactions", payload)
-	waitSettled(t, h, 1, "replayed reaction must dedupe")
+	waitSettled(t, h, 1, "replayed reaction must dedupe before the lookup")
 	h.stop(t)
 }
 
