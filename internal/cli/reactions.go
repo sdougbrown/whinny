@@ -18,19 +18,13 @@ import (
 // prints; the JSON output is untruncated.
 const maxEmojiList = 200
 
-// historyProbeLimit is how much recent history the visibility check
-// fetches. Reactions land on recent messages — a wake or a history
-// page carried the id — so a bounded window is the honest probe.
-const historyProbeLimit = 50
-
 // ReactionsHandler runs `whinny reactions`: with --list it reports the
 // transport's reaction support (capabilities and the custom emoji
 // catalog); otherwise it sets the caller's complete emoji set on one
 // message — an empty argument list clears. The send-path guard chain
-// runs before the connection is opened, and the message's visibility
-// in the target room is checked first: a message_id from another room
-// fails server-side with an error the caller cannot fix from the
-// message.
+// runs before the connection is opened. The server names what the
+// caller got wrong (an unknown message_id, an unknown custom emoji),
+// so its invalid_params refusals surface as usage errors.
 func (d Deps) ReactionsHandler(ctx context.Context, inv clicontract.Invocation, _ io.Writer) (any, error) {
 	if inv.Bools["list"] {
 		return d.reactionsList(ctx, inv)
@@ -94,25 +88,6 @@ func (d Deps) ReactionsHandler(ctx context.Context, inv clicontract.Invocation, 
 		bucket.Refund()
 		return nil, err
 	}
-	// The reactions request carries no room_id, so a message_id from
-	// another room fails server-side as "unknown message" — true but
-	// unactionable. The room's history is the visibility proof: refuse
-	// here instead, naming what the caller can fix.
-	h, err := client.History(ctx, apronws.HistoryParams{RoomID: room.ID, Limit: historyProbeLimit})
-	if err != nil {
-		return failSend(OperationalErrorf("history: %v", err))
-	}
-	visible := false
-	for _, m := range h.Messages {
-		if m.MessageID == messageID {
-			visible = true
-			break
-		}
-	}
-	if !visible {
-		bucket.Refund()
-		return nil, UsageErrorf("reactions: message %s not found in %s's recent history; reply-to ids and message ids arrive in wakes and `whinny history --json`", messageID, room.ID)
-	}
 	if !client.HasCapability("reactions") {
 		// A server without the capability would refuse every request
 		// server-side, and each refusal would count toward the shared
@@ -121,12 +96,21 @@ func (d Deps) ReactionsHandler(ctx context.Context, inv clicontract.Invocation, 
 		return nil, UsageErrorf("reactions: this server does not offer the reactions capability (see `whinny reactions --list`)")
 	}
 	if err := client.SetReactions(ctx, messageID, emojis); err != nil {
+		// A caller mistake is a usage error that refunds without
+		// counting toward the breaker: a transport refusal (slack), or
+		// the server's invalid_params — the react request names what
+		// the caller got wrong, such as `Unknown message "m9"` for an
+		// id from another room (§4.7 resolves through the caller's
+		// visible messages).
 		var uerr *Error
 		if errors.As(err, &uerr) && uerr.Class == ClassUsage {
-			// A transport refusal (slack) is a caller mistake: refund
-			// without counting toward the breaker.
 			bucket.Refund()
 			return nil, err
+		}
+		var aerr *apronws.Error
+		if errors.As(err, &aerr) && aerr.Code == apronws.CodeInvalidParams {
+			bucket.Refund()
+			return nil, UsageErrorf("reactions: %s", aerr.Message)
 		}
 		return failSend(OperationalErrorf("reactions: %v", err))
 	}

@@ -7,6 +7,14 @@ import (
 	"time"
 )
 
+// Server error codes (§2.4): the ones callers classify on.
+const (
+	// CodeInvalidParams is a request that names something that does
+	// not exist or is malformed: an unknown message_id, an unknown
+	// custom emoji key.
+	CodeInvalidParams = -32602
+)
+
 // Sentinel errors returned by the client, independent of the server.
 var (
 	// ErrNotAuthenticated is returned by Send and Ping when the connection

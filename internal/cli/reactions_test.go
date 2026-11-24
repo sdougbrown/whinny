@@ -27,7 +27,6 @@ func reactionsDeps(t *testing.T) (Deps, *fakeClient, *store.Store) {
 
 func TestReactionsHandlerSetsEmoji(t *testing.T) {
 	d, c, _ := reactionsDeps(t)
-	c.history = apronws.HistoryResult{Messages: []apronws.Message{{MessageID: "m1", RoomID: "r1"}}}
 	_, err := d.ReactionsHandler(context.Background(), inv("reactions", []string{"👍"}, map[string]string{"room": "r1", "message": "m1"}, nil), nil)
 	if err != nil {
 		t.Fatalf("reactions: %v", err)
@@ -43,7 +42,6 @@ func TestReactionsHandlerSetsEmoji(t *testing.T) {
 
 func TestReactionsHandlerClears(t *testing.T) {
 	d, c, _ := reactionsDeps(t)
-	c.history = apronws.HistoryResult{Messages: []apronws.Message{{MessageID: "m1", RoomID: "r1"}}}
 	_, err := d.ReactionsHandler(context.Background(), inv("reactions", nil, map[string]string{"room": "r1", "message": "m1"}, nil), nil)
 	if err != nil {
 		t.Fatalf("reactions clear: %v", err)
@@ -55,7 +53,6 @@ func TestReactionsHandlerClears(t *testing.T) {
 
 func TestReactionsHandlerMultipleEmoji(t *testing.T) {
 	d, c, _ := reactionsDeps(t)
-	c.history = apronws.HistoryResult{Messages: []apronws.Message{{MessageID: "m1", RoomID: "r1"}}}
 	_, err := d.ReactionsHandler(context.Background(), inv("reactions", []string{"👍", ":party:"}, map[string]string{"room": "r1", "message": "m1"}, nil), nil)
 	if err != nil {
 		t.Fatalf("reactions: %v", err)
@@ -65,36 +62,42 @@ func TestReactionsHandlerMultipleEmoji(t *testing.T) {
 	}
 }
 
-func TestReactionsHandlerRefusesMessageFromOtherRoom(t *testing.T) {
+func TestReactionsHandlerServerUnknownMessageIsUsageError(t *testing.T) {
+	// The server names an unknown message_id in its invalid_params
+	// error (§4.7: the request carries no room_id; the server resolves
+	// the message and checks the caller's visibility). That is a
+	// caller mistake: it must surface as a usage error that refunds
+	// the rate token, never count toward the breaker.
 	d, c, _ := reactionsDeps(t)
-	// The resolved room is r1 but the message id is not visible there
-	// (the fake history is empty); the handler must refuse via the
-	// history visibility check, not send a doomed request.
-	_, err := d.ReactionsHandler(context.Background(), inv("reactions", []string{"👍"}, map[string]string{"room": "r1", "message": "missing"}, nil), nil)
-	if err == nil {
-		t.Fatal("reactions with unknown message id succeeded, want refusal")
+	c.setReactionsErr = &apronws.Error{Code: -32602, Message: `Unknown message "m9"`}
+	_, err := d.ReactionsHandler(context.Background(), inv("reactions", []string{"👍"}, map[string]string{"room": "r1", "message": "m9"}, nil), nil)
+	if err == nil || !strings.Contains(err.Error(), `Unknown message "m9"`) {
+		t.Fatalf("error = %v, want the server's message carried through", err)
 	}
-	if len(c.reactionSets) != 0 {
-		t.Errorf("SetReactions called %d times, want 0", len(c.reactionSets))
+	v, err := d.Store.GetMeta(context.Background(), store.MetaPostFailures)
+	if err != nil {
+		t.Fatalf("get failures: %v", err)
+	}
+	if v != "" && v != "0" {
+		t.Errorf("consecutive failures = %q, want 0 (invalid params is a usage error)", v)
 	}
 }
 
-func TestReactionsHandlerMessageVisibleThroughNotJoinedRoom(t *testing.T) {
+func TestReactionsHandlerMessageInNotJoinedRoomReacts(t *testing.T) {
 	// Reactions only need a room the caller can see: resolution reaches
-	// not-joined rooms by id, and the history probe (not membership)
-	// carries the visibility proof.
+	// not-joined rooms by id, and the server checks visibility itself.
 	d, c, _ := reactionsDeps(t)
 	c.joined = nil
 	c.notJoined = []apronws.Room{{ID: "r1", Title: "General"}}
-	c.history = apronws.HistoryResult{Messages: []apronws.Message{{
-		MessageID: "m1", RoomID: "r1",
-	}}}
 	_, err := d.ReactionsHandler(context.Background(), inv("reactions", []string{"👍"}, map[string]string{"room": "r1", "message": "m1"}, nil), nil)
 	if err != nil {
 		t.Fatalf("reactions: %v", err)
 	}
 	if len(c.reactionSets) != 1 {
 		t.Errorf("SetReactions calls = %d, want 1", len(c.reactionSets))
+	}
+	if len(c.histories) != 0 {
+		t.Errorf("History called %d times, want 0 (no probe round trip)", len(c.histories))
 	}
 }
 
@@ -128,7 +131,6 @@ func TestReactionsHandlerRefusesBreaker(t *testing.T) {
 
 func TestReactionsHandlerRateLimitCountsTowardBreaker(t *testing.T) {
 	d, c, _ := reactionsDeps(t)
-	c.history = apronws.HistoryResult{Messages: []apronws.Message{{MessageID: "m1", RoomID: "r1"}}}
 	d.Env = func(k string) string {
 		if k == "WHINNY_RATE_PER_MINUTE" {
 			return "1"
@@ -244,8 +246,7 @@ func TestReactionsHandlerListJSON(t *testing.T) {
 }
 
 func TestReactionsHandlerJSONOutput(t *testing.T) {
-	d, c, _ := reactionsDeps(t)
-	c.history = apronws.HistoryResult{Messages: []apronws.Message{{MessageID: "m1", RoomID: "r1"}}}
+	d, _, _ := reactionsDeps(t)
 	out, err := d.ReactionsHandler(context.Background(), inv("reactions", []string{"👍"}, map[string]string{"room": "r1", "message": "m1"}, map[string]bool{"json": true}), nil)
 	if err != nil {
 		t.Fatalf("reactions --json: %v", err)
@@ -267,7 +268,6 @@ func TestReactionsHandlerRefusesWithoutCapability(t *testing.T) {
 	// error before any send, so the shared breaker never counts it.
 	d, c, _ := reactionsDeps(t)
 	c.capabilities = nil
-	c.history = apronws.HistoryResult{Messages: []apronws.Message{{MessageID: "m1", RoomID: "r1"}}}
 	_, err := d.ReactionsHandler(context.Background(), inv("reactions", []string{"👍"}, map[string]string{"room": "r1", "message": "m1"}, nil), nil)
 	if err == nil || !strings.Contains(err.Error(), "does not offer the reactions capability") {
 		t.Fatalf("error = %v, want the capability refusal", err)
@@ -288,7 +288,6 @@ func TestReactionsHandlerSetReactionsErrorCountsTowardBreaker(t *testing.T) {
 	// An operational SetReactions failure is a bad send outcome: the
 	// token is refunded and the failure counter bumps.
 	d, c, _ := reactionsDeps(t)
-	c.history = apronws.HistoryResult{Messages: []apronws.Message{{MessageID: "m1", RoomID: "r1"}}}
 	c.setReactionsErr = OperationalErrorf("connection lost")
 	_, err := d.ReactionsHandler(context.Background(), inv("reactions", []string{"👍"}, map[string]string{"room": "r1", "message": "m1"}, nil), nil)
 	if err == nil || strings.Contains(err.Error(), "usage") {
@@ -305,8 +304,7 @@ func TestReactionsHandlerSetReactionsErrorCountsTowardBreaker(t *testing.T) {
 
 func TestReactionsHandlerSuccessResetsFailures(t *testing.T) {
 	// A confirmed send resets the consecutive failure counter.
-	d, c, st := reactionsDeps(t)
-	c.history = apronws.HistoryResult{Messages: []apronws.Message{{MessageID: "m1", RoomID: "r1"}}}
+	d, _, st := reactionsDeps(t)
 	if err := st.SetMeta(context.Background(), store.MetaPostFailures, "3"); err != nil {
 		t.Fatalf("seed failures: %v", err)
 	}

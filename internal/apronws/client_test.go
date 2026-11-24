@@ -457,50 +457,53 @@ func TestEmojiCatalogWithoutExt(t *testing.T) {
 func TestNextIDUniqueAcrossClients(t *testing.T) {
 	// Two clients sharing an apron account must never reuse a request
 	// id (§1.2 dedup is per user): the ids differ across instances.
+	// The fake's accepted connections accumulate, so a per-connect
+	// handshake goroutine that waits for the *next* slot (one past the
+	// connections already accepted) and a connect loop in lockstep
+	// keeps the pairing deterministic.
 	f := apronfake.New(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	go func() {
-		fc, err := f.WaitConn(1)
-		if err != nil {
-			f.ReportError(err)
-			return
-		}
-		if err := fc.Handshake(ctx, 30); err != nil {
-			f.ReportError(err)
-		}
-	}()
-	c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-	defer c.Close()
-	for i := 1; i <= 2; i++ {
-		go func(n int) {
-			fc, err := f.WaitConn(n)
+	var first *Client
+	prefixes := make(map[uint64]bool)
+	for i := 0; i < 3; i++ {
+		next := i + 1 // the slot this round's dial lands in
+		handshakeDone := make(chan error, 1)
+		go func() {
+			fc, err := f.WaitConn(next)
 			if err != nil {
-				f.ReportError(err)
+				handshakeDone <- err
 				return
 			}
-			if err := fc.Handshake(ctx, 30); err != nil {
-				f.ReportError(err)
-			}
-		}(i + 1)
+			hctx, hcancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer hcancel()
+			handshakeDone <- fc.Handshake(hctx, 30)
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		c, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
+		cancel()
+		if err != nil {
+			t.Fatalf("Connect %d: %v", i+1, err)
+		}
+		if err := <-handshakeDone; err != nil {
+			f.ReportError(err)
+		}
+		if c.idPrefix == 0 {
+			t.Errorf("client %d idPrefix = 0, want seeded nonzero", i+1)
+		}
+		if prefixes[c.idPrefix] {
+			t.Errorf("clients share id prefix %d", c.idPrefix)
+		}
+		prefixes[c.idPrefix] = true
+		// Close before the next round so the fake's connection slots
+		// do not accumulate read loops.
+		c.Close()
+		if first == nil {
+			first = c
+		}
 	}
-	other, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
-	if err != nil {
-		t.Fatalf("Connect (second): %v", err)
-	}
-	defer other.Close()
-	// The server deduplicates request ids per user across connections,
-	// so two real Connect calls must seed distinct nonzero prefixes.
-	if c.idPrefix == 0 || other.idPrefix == 0 {
-		t.Errorf("id prefixes = %d/%d, want both seeded nonzero", c.idPrefix, other.idPrefix)
-	}
-	if c.idPrefix == other.idPrefix {
-		t.Error("two connected clients share one id prefix")
-	}
-	if c.nextID() == c.nextID() {
+	if first.nextID() == first.nextID() {
 		t.Error("one client repeated a request id")
 	}
 }
+
+// clients collects each Connect's client for the prefix assertions.
+var clients []*Client
