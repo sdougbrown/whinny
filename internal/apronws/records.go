@@ -143,8 +143,10 @@ type Activity struct {
 	Raw json.RawMessage
 }
 
-// ReactionsRecord is one reactions push (§4.7): the complete reaction
-// sets of one message's authors whose set is non-empty.
+// ReactionsRecord is one reactions record (§4.7): the server logs one
+// record per changing author, carrying that author's complete set — an
+// empty set is their clear. A message-wide snapshot is several records
+// at consecutive log positions.
 type ReactionsRecord struct {
 	LogID     LogID         `json:"log_id"`
 	MessageID string        `json:"message_id"`

@@ -242,6 +242,13 @@ func isBot(peers Peers, userID string) bool {
 	return ok && p.IsBot
 }
 
+// IsBot reports whether userID names a known bot in the peers list. The
+// daemon's reaction firebreak shares the policy's bot rule so the two
+// cannot drift.
+func IsBot(peers Peers, userID string) bool {
+	return isBot(peers, userID)
+}
+
 // matchWatches returns every watch that matches the message, in list
 // order. A watch with an empty RoomID never matches.
 func matchWatches(msg Msg, self Self, watches []watch.Watch) []WatchHit {

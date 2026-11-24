@@ -219,14 +219,6 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 	}); ok {
 		f.SetTombstoneFeed(d.hist.feed)
 	}
-	// A reactions push (apron §4.7) wakes on a reaction to one of the
-	// bot's own messages; a link without the hook (Slack, a fake)
-	// never sees reaction wakes.
-	if f, ok := d.link.(interface {
-		SetReactionFeed(func(apronws.ReactionsRecord))
-	}); ok {
-		f.SetReactionFeed(func(rec apronws.ReactionsRecord) { d.handleReaction(ctx, rec) })
-	}
 	// The reconnect hook is optional: an apron link forwards it to the
 	// client; a link without the hook simply never replays on reconnect.
 	if r, ok := d.link.(interface{ SetOnReconnect(func()) }); ok {
@@ -351,6 +343,10 @@ func (d *daemon) catchUp(ctx context.Context) {
 // queue flush and shared callbacks) runs after the lock is released so
 // a slow deliverer cannot stall live processing or catch-up.
 func (d *daemon) handleEvent(ctx context.Context, ev LinkEvent, subscribe bool) {
+	if ev.Kind == KindReaction {
+		d.handleReaction(ctx, ev)
+		return
+	}
 	if ev.Kind != KindMessage {
 		return
 	}
@@ -422,47 +418,52 @@ func (d *daemon) processEvent(ctx context.Context, ev LinkEvent, subscribe bool,
 	return nil, d.handleResidentLocked(ctx, m, ev.ImageURL, author, authorOK, authorErr)
 }
 
-// handleReaction evaluates one reactions push (apron §4.7): a non-self
-// reaction set on one of the bot's own messages wakes the agent
-// (kind=reaction). The reacted-to message's author resolves through the
-// reply-author cache (a streamed message is already there; a miss
-// falls back to one bounded History call), outside procMu like the
-// reply path's lookup. The push carries no body to evaluate — watches
-// never match reactions — so this path is resident-only: shared mode
-// evaluates watches, and none match a reaction.
-func (d *daemon) handleReaction(ctx context.Context, rec apronws.ReactionsRecord) {
-	if d.cfg.Mode == ModeShared {
+// handleReaction evaluates one reaction-set event (apron §4.7): a
+// reaction by someone who is neither the bot nor a peer bot, on one of
+// the bot's own messages, wakes the agent (kind=reaction). The event
+// runs on the main loop like a message event, so the room cursor's
+// writes stay in log order; the reacted-to message's author resolves
+// through the reply-author cache (a streamed message is already there;
+// a miss falls back to one bounded History call) outside procMu, like
+// the reply path's lookup. The push carries no body to evaluate —
+// watches never match reactions — so this path is resident-only:
+// shared mode evaluates watches, and none match a reaction.
+func (d *daemon) handleReaction(ctx context.Context, ev LinkEvent) {
+	if d.cfg.Mode == ModeShared || ev.Rec == nil {
 		return
 	}
-	// Only sets by someone else can wake: the bot's own reaction sets
-	// (its own acks) never do, matching the self-post firebreak.
+	// Only sets by someone outside the firebreak can wake: the bot's
+	// own reaction sets (its own acks) never do, and a peer bot's
+	// neither, matching the self-post firebreak — two bots acking each
+	// other with reactions must not wake each other.
 	var sets []apronws.ReactionSet
-	for _, s := range rec.Reactions {
-		if s.From.UserID != d.cfg.Self.UserID {
-			sets = append(sets, s)
+	for _, s := range ev.Rec.Reactions {
+		if s.From.UserID == d.cfg.Self.UserID || d.isPeer(s.From.UserID) {
+			continue
 		}
+		sets = append(sets, s)
 	}
 	if len(sets) == 0 {
 		return
 	}
-	author, ok, err := d.lookupAuthor(ctx, rec.RoomID, rec.MessageID)
+	author, ok, err := d.lookupAuthor(ctx, ev.RoomID, ev.Rec.MessageID)
 	if err != nil || !ok || author != d.cfg.Self.UserID {
 		return
 	}
-	// Dedupe against the room cursor (the reactions record's log_id
-	// comes from the same server-wide sequence as message log ids),
-	// then advance it. procMu covers the check-then-act and the
-	// enqueue; delivery runs after the lock is released.
+	// The envelope carries only the sets that passed the firebreak, so
+	// the wake never names the bot's own (or a peer's) set.
+	rec := *ev.Rec
+	rec.Reactions = sets
 	d.procMu.Lock()
-	cursor, err := d.store.GetCursor(ctx, rec.RoomID)
+	cursor, err := d.store.GetCursor(ctx, ev.RoomID)
 	if err != nil {
-		log.Printf("daemon: get cursor %s: %v", rec.RoomID, err)
-	} else if int64(rec.LogID) <= cursor {
+		log.Printf("daemon: get cursor %s: %v", ev.RoomID, err)
+	} else if ev.Cursor <= cursor {
 		d.procMu.Unlock()
 		return
 	}
-	if err := d.store.SetCursor(ctx, rec.RoomID, int64(rec.LogID)); err != nil {
-		log.Printf("daemon: set cursor %s: %v", rec.RoomID, err)
+	if err := d.store.SetCursor(ctx, ev.RoomID, ev.Cursor); err != nil {
+		log.Printf("daemon: set cursor %s: %v", ev.RoomID, err)
 	}
 	payload, err := encodePayload(ReactionEnvelope(rec))
 	if err != nil {
@@ -477,6 +478,12 @@ func (d *daemon) handleReaction(ctx context.Context, rec apronws.ReactionsRecord
 	}
 	d.procMu.Unlock()
 	d.flushQueue(ctx)
+}
+
+// isPeer reports whether userID names a peer bot in the config's peers
+// map (a peer's IsBot flag; a human peer is not a bot).
+func (d *daemon) isPeer(userID string) bool {
+	return wake.IsBot(d.cfg.Peers, userID)
 }
 
 // subscribeOwnThread arms a subscription watch on the thread the bot

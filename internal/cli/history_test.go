@@ -115,3 +115,84 @@ func TestHistoryReactionsAttached(t *testing.T) {
 		t.Errorf("text = %q, want a bob reacted line", text)
 	}
 }
+
+// TestFoldReactionsTable pins the fold's replace/clear/re-add model per
+// §4.7: each record carries one author's complete set at that log
+// position; the last record naming an author wins.
+func TestFoldReactionsTable(t *testing.T) {
+	msgs := []apronws.Message{
+		{MessageID: "m1", RoomID: "r1"},
+		{MessageID: "m2", RoomID: "r1"},
+	}
+	from := func(id string) apronws.From { return apronws.From{UserID: id} }
+	rec := func(id string, sets ...apronws.ReactionSet) apronws.ReactionsRecord {
+		return apronws.ReactionsRecord{MessageID: id, RoomID: "r1", Reactions: sets}
+	}
+	set := func(userID string, emojis ...string) apronws.ReactionSet {
+		return apronws.ReactionSet{From: from(userID), Emojis: emojis}
+	}
+	tests := []struct {
+		name    string
+		records []apronws.ReactionsRecord
+		want    map[string][]apronws.ReactionSet
+	}{
+		{
+			name:    "later set by same author replaces",
+			records: []apronws.ReactionsRecord{rec("m1", set("A", "👍")), rec("m1", set("A", "🎉"))},
+			want:    map[string][]apronws.ReactionSet{"m1": {set("A", "🎉")}},
+		},
+		{
+			name:    "clear removes the author and the message key",
+			records: []apronws.ReactionsRecord{rec("m1", set("A", "👍")), rec("m1", set("A"))},
+			want:    map[string][]apronws.ReactionSet{},
+		},
+		{
+			name:    "re-add after clear",
+			records: []apronws.ReactionsRecord{rec("m1", set("A", "👍")), rec("m1", set("A")), rec("m1", set("A", "🎉"))},
+			want:    map[string][]apronws.ReactionSet{"m1": {set("A", "🎉")}},
+		},
+		{
+			name: "one author clears while another replaces",
+			records: []apronws.ReactionsRecord{
+				rec("m1", set("A", "👍"), set("B", "🎉")),
+				rec("m1", set("A")),
+				rec("m1", set("B", "🚀")),
+			},
+			want: map[string][]apronws.ReactionSet{"m1": {set("B", "🚀")}},
+		},
+		{
+			name:    "clear for a never-seen author is a no-op",
+			records: []apronws.ReactionsRecord{rec("m1", set("X"))},
+			want:    map[string][]apronws.ReactionSet{},
+		},
+		{
+			name:    "record for a message outside the window is dropped",
+			records: []apronws.ReactionsRecord{rec("m9", set("A", "👍"))},
+			want:    map[string][]apronws.ReactionSet{},
+		},
+		{
+			name:    "per-message state stays separate",
+			records: []apronws.ReactionsRecord{rec("m1", set("A", "👍")), rec("m2", set("B", "🎉"))},
+			want:    map[string][]apronws.ReactionSet{"m1": {set("A", "👍")}, "m2": {set("B", "🎉")}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := foldReactions(msgs, tt.records)
+			if len(got) != len(tt.want) {
+				t.Fatalf("fold = %+v, want %+v", got, tt.want)
+			}
+			for id, wantSets := range tt.want {
+				gotSets := got[id]
+				if len(gotSets) != len(wantSets) {
+					t.Fatalf("fold[%s] = %+v, want %+v", id, gotSets, wantSets)
+				}
+				for i, w := range wantSets {
+					if gotSets[i].From.UserID != w.From.UserID || strings.Join(gotSets[i].Emojis, ",") != strings.Join(w.Emojis, ",") {
+						t.Fatalf("fold[%s][%d] = %+v, want %+v", id, i, gotSets[i], w)
+					}
+				}
+			}
+		})
+	}
+}

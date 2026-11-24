@@ -158,6 +158,9 @@ func (c *SlackClient) SetReactions(_ context.Context, _ string, _ []string) erro
 	return UsageErrorf("reactions are not supported on the Slack transport yet")
 }
 
+// HasCapability is false: Slack has no apron capability list.
+func (c *SlackClient) HasCapability(_ string) bool { return false }
+
 // EmojiCatalog returns nil: Slack's emoji.list maps names to image
 // URLs, not a reaction catalog in apron's shape.
 func (c *SlackClient) EmojiCatalog(_ context.Context) (map[string]apronws.EmojiEntry, error) {

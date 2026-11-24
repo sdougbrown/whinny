@@ -144,50 +144,59 @@ func projectMessage(m apronws.Message, reactions []apronws.ReactionSet) historyM
 
 // foldReactions folds a history window's reaction records onto the
 // message ids they react to. Each record carries one author's complete
-// set at that log position, so a later record from the same author
-// replaces their earlier one; the fold's result is the current sets
-// per message. A record whose message is not in the window is dropped.
+// set at that log position — an empty set is that author's clear — so
+// the last record naming an author wins; the fold's result is the
+// current sets per message. A record whose message is not in the
+// window is dropped.
 func foldReactions(msgs []apronws.Message, records []apronws.ReactionsRecord) map[string][]apronws.ReactionSet {
 	inWindow := make(map[string]bool, len(msgs))
 	for _, m := range msgs {
 		inWindow[m.MessageID] = true
 	}
-	// An author's complete set replaces their previous one: track per
-	// (message, author) position in each message's slice.
-	index := make(map[string]map[string]int) // messageID -> userID -> slice position
-	out := make(map[string][]apronws.ReactionSet)
+	// The current state is one entry per author: the last record that
+	// names an author carries their whole set, so it simply overwrites.
+	current := make(map[string]map[string]apronws.ReactionSet) // messageID -> userID -> set
+	// order keeps each message's first-appearance author order, so the
+	// projection is deterministic regardless of map iteration.
+	order := make(map[string][]string)
 	for _, rec := range records {
 		if !inWindow[rec.MessageID] {
 			continue
 		}
-		if index[rec.MessageID] == nil {
-			index[rec.MessageID] = make(map[string]int)
-			out[rec.MessageID] = nil
+		if current[rec.MessageID] == nil {
+			current[rec.MessageID] = make(map[string]apronws.ReactionSet)
 		}
 		for _, set := range rec.Reactions {
-			if pos, ok := index[rec.MessageID][set.From.UserID]; ok && pos < len(out[rec.MessageID]) && out[rec.MessageID][pos].From.UserID == set.From.UserID {
-				// Same author, later complete set: replace in place;
-				// an empty set removes their entry.
-				if len(set.Emojis) == 0 {
-					sets := out[rec.MessageID]
-					out[rec.MessageID] = append(sets[:pos], sets[pos+1:]...)
-					index[rec.MessageID][set.From.UserID] = 0
-					delete(index[rec.MessageID], set.From.UserID)
-				} else {
-					out[rec.MessageID][pos] = set
+			userID := set.From.UserID
+			if len(set.Emojis) == 0 {
+				// The clear drops the author's state and their order
+				// entry, so a later re-add appends fresh and cannot
+				// leave a stale name in the projection.
+				delete(current[rec.MessageID], userID)
+				for i, id := range order[rec.MessageID] {
+					if id == userID {
+						order[rec.MessageID] = append(order[rec.MessageID][:i], order[rec.MessageID][i+1:]...)
+						break
+					}
 				}
 				continue
 			}
-			if len(set.Emojis) == 0 {
-				continue
+			if _, seen := current[rec.MessageID][userID]; !seen {
+				order[rec.MessageID] = append(order[rec.MessageID], userID)
 			}
-			index[rec.MessageID][set.From.UserID] = len(out[rec.MessageID])
-			out[rec.MessageID] = append(out[rec.MessageID], set)
+			current[rec.MessageID][userID] = set
 		}
 	}
-	for id, sets := range out {
-		if len(sets) == 0 {
-			delete(out, id)
+	out := make(map[string][]apronws.ReactionSet)
+	for messageID, authors := range current {
+		sets := make([]apronws.ReactionSet, 0, len(authors))
+		for _, userID := range order[messageID] {
+			if set, ok := authors[userID]; ok {
+				sets = append(sets, set)
+			}
+		}
+		if len(sets) > 0 {
+			out[messageID] = sets
 		}
 	}
 	return out

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"sort"
 	"strings"
 
@@ -112,6 +113,13 @@ func (d Deps) ReactionsHandler(ctx context.Context, inv clicontract.Invocation, 
 		bucket.Refund()
 		return nil, UsageErrorf("reactions: message %s not found in %s's recent history; reply-to ids and message ids arrive in wakes and `whinny history --json`", messageID, room.ID)
 	}
+	if !client.HasCapability("reactions") {
+		// A server without the capability would refuse every request
+		// server-side, and each refusal would count toward the shared
+		// breaker, blocking posts too. Refuse here as a usage error.
+		bucket.Refund()
+		return nil, UsageErrorf("reactions: this server does not offer the reactions capability (see `whinny reactions --list`)")
+	}
 	if err := client.SetReactions(ctx, messageID, emojis); err != nil {
 		var uerr *Error
 		if errors.As(err, &uerr) && uerr.Class == ClassUsage {
@@ -123,9 +131,11 @@ func (d Deps) ReactionsHandler(ctx context.Context, inv clicontract.Invocation, 
 		return failSend(OperationalErrorf("reactions: %v", err))
 	}
 	// The send is confirmed: reset the consecutive failure counter (the
-	// latch is sticky; clearing is manual).
+	// latch is sticky; clearing is manual). A reset failure is logged,
+	// not returned: the reaction succeeded, and a non-zero exit would
+	// send the agent to retry a completed send.
 	if err := st.ResetPostFailures(ctx); err != nil {
-		return nil, OperationalErrorf("post-failure reset: %v", err)
+		log.Printf("whinny: post-failure reset: %v", err)
 	}
 	if inv.Bools["json"] {
 		return map[string]any{"message_id": messageID, "room_id": room.ID, "cleared": len(emojis) == 0}, nil
@@ -147,17 +157,7 @@ func (d Deps) reactionsList(ctx context.Context, inv clicontract.Invocation) (an
 	if owned {
 		defer client.Close()
 	}
-	reactions := false
-	if c, ok := client.(interface {
-		Capabilities() []string
-	}); ok {
-		for _, cap := range c.Capabilities() {
-			if cap == "reactions" {
-				reactions = true
-				break
-			}
-		}
-	}
+	reactions := client.HasCapability("reactions")
 	emoji, err := client.EmojiCatalog(ctx)
 	if err != nil {
 		return nil, OperationalErrorf("emoji catalog: %v", err)

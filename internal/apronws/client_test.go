@@ -475,9 +475,30 @@ func TestNextIDUniqueAcrossClients(t *testing.T) {
 		t.Fatalf("Connect: %v", err)
 	}
 	defer c.Close()
-	other := &Client{pending: make(map[string]*pending), idPrefix: c.idPrefix + 1}
-	if c.nextID() == other.nextID() {
-		t.Error("two clients produced the same first request id")
+	for i := 1; i <= 2; i++ {
+		go func(n int) {
+			fc, err := f.WaitConn(n)
+			if err != nil {
+				f.ReportError(err)
+				return
+			}
+			if err := fc.Handshake(ctx, 30); err != nil {
+				f.ReportError(err)
+			}
+		}(i + 1)
+	}
+	other, err := Connect(ctx, Options{URL: f.WSURL(), Token: "test-token"})
+	if err != nil {
+		t.Fatalf("Connect (second): %v", err)
+	}
+	defer other.Close()
+	// The server deduplicates request ids per user across connections,
+	// so two real Connect calls must seed distinct nonzero prefixes.
+	if c.idPrefix == 0 || other.idPrefix == 0 {
+		t.Errorf("id prefixes = %d/%d, want both seeded nonzero", c.idPrefix, other.idPrefix)
+	}
+	if c.idPrefix == other.idPrefix {
+		t.Error("two connected clients share one id prefix")
 	}
 	if c.nextID() == c.nextID() {
 		t.Error("one client repeated a request id")

@@ -232,3 +232,22 @@ func TestDecodeHistoryReactions(t *testing.T) {
 		t.Errorf("messages = %d, want 1", len(r.Messages))
 	}
 }
+
+func TestDecodeReactionsRecordSemantics(t *testing.T) {
+	// §4.7 pins the record model: one record per changing author. Two
+	// consecutive records for one message — an author sets, then clears
+	// — decode as two single-set records, the shape the daemon and the
+	// history fold consume.
+	for _, raw := range []string{
+		`{"log_id":"11","message_id":"m1","room_id":"r1","reactions":[{"from":{"user_id":"u1"},"emojis":["👍"]}]}`,
+		`{"log_id":"12","message_id":"m1","room_id":"r1","reactions":[{"from":{"user_id":"u1"},"emojis":[]}]}`,
+	} {
+		rec, ok := decodePush("reactions", []byte(raw))
+		if !ok {
+			t.Fatalf("decodePush(%s) failed", raw)
+		}
+		if len(rec.Reactions.Reactions) != 1 {
+			t.Errorf("record has %d sets, want exactly the one changing author's", len(rec.Reactions.Reactions))
+		}
+	}
+}

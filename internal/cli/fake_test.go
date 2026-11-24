@@ -24,6 +24,7 @@ type fakeClient struct {
 	reactionSets    []reactionSetCall
 	setReactionsErr error
 	emojiCatalog    map[string]apronws.EmojiEntry
+	capabilities    []string
 }
 
 // reactionSetCall is one recorded SetReactions call.
@@ -65,6 +66,15 @@ func (f *fakeClient) SetReactions(_ context.Context, messageID string, emojis []
 	}
 	f.reactionSets = append(f.reactionSets, reactionSetCall{MessageID: messageID, Emojis: emojis})
 	return nil
+}
+
+func (f *fakeClient) HasCapability(name string) bool {
+	for _, c := range f.capabilities {
+		if c == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *fakeClient) EmojiCatalog(_ context.Context) (map[string]apronws.EmojiEntry, error) {

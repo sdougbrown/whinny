@@ -14,6 +14,7 @@ func reactionsDeps(t *testing.T) (Deps, *fakeClient, *store.Store) {
 	c := &fakeClient{
 		joined: []apronws.Room{{ID: "r1", Title: "General"}},
 	}
+	c.capabilities = []string{"reactions"}
 	st, err := store.Open(t.TempDir() + "/state.db")
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -79,7 +80,12 @@ func TestReactionsHandlerRefusesMessageFromOtherRoom(t *testing.T) {
 }
 
 func TestReactionsHandlerMessageVisibleThroughNotJoinedRoom(t *testing.T) {
+	// Reactions only need a room the caller can see: resolution reaches
+	// not-joined rooms by id, and the history probe (not membership)
+	// carries the visibility proof.
 	d, c, _ := reactionsDeps(t)
+	c.joined = nil
+	c.notJoined = []apronws.Room{{ID: "r1", Title: "General"}}
 	c.history = apronws.HistoryResult{Messages: []apronws.Message{{
 		MessageID: "m1", RoomID: "r1",
 	}}}
@@ -181,8 +187,8 @@ func TestReactionsHandlerListWithoutRoom(t *testing.T) {
 	if !ok {
 		t.Fatalf("output = %T, want string", out)
 	}
-	if !strings.Contains(text, "reactions: not supported") {
-		t.Errorf("list text = %q, want the not-supported line (fake has no Capabilities)", text)
+	if !strings.Contains(text, "reactions: supported") {
+		t.Errorf("list text = %q, want the supported line (fake advertises reactions)", text)
 	}
 	if !strings.Contains(text, ":party:") {
 		t.Errorf("list text = %q, want the custom emoji", text)
@@ -228,8 +234,8 @@ func TestReactionsHandlerListJSON(t *testing.T) {
 	if !ok {
 		t.Fatalf("output = %T, want map", out)
 	}
-	if reactions, ok := m["reactions"].(bool); !ok || reactions {
-		t.Errorf("reactions = %v, want false (fake has no Capabilities)", m["reactions"])
+	if reactions, ok := m["reactions"].(bool); !ok || !reactions {
+		t.Errorf("reactions = %v, want true (fake advertises reactions)", m["reactions"])
 	}
 	emoji, ok := m["emoji"].(map[string]apronws.EmojiEntry)
 	if !ok || len(emoji) != 1 {
@@ -253,5 +259,65 @@ func TestReactionsHandlerJSONOutput(t *testing.T) {
 	}
 	if cleared, _ := m["cleared"].(bool); cleared {
 		t.Errorf("cleared = %v, want false", m["cleared"])
+	}
+}
+
+func TestReactionsHandlerRefusesWithoutCapability(t *testing.T) {
+	// A server without the reactions capability refuses as a usage
+	// error before any send, so the shared breaker never counts it.
+	d, c, _ := reactionsDeps(t)
+	c.capabilities = nil
+	c.history = apronws.HistoryResult{Messages: []apronws.Message{{MessageID: "m1", RoomID: "r1"}}}
+	_, err := d.ReactionsHandler(context.Background(), inv("reactions", []string{"👍"}, map[string]string{"room": "r1", "message": "m1"}, nil), nil)
+	if err == nil || !strings.Contains(err.Error(), "does not offer the reactions capability") {
+		t.Fatalf("error = %v, want the capability refusal", err)
+	}
+	if len(c.reactionSets) != 0 {
+		t.Errorf("SetReactions called, want 0")
+	}
+	v, err := d.Store.GetMeta(context.Background(), store.MetaPostFailures)
+	if err != nil {
+		t.Fatalf("get failures: %v", err)
+	}
+	if v != "" && v != "0" {
+		t.Errorf("consecutive failures = %q, want 0 (capability refusal is a usage error)", v)
+	}
+}
+
+func TestReactionsHandlerSetReactionsErrorCountsTowardBreaker(t *testing.T) {
+	// An operational SetReactions failure is a bad send outcome: the
+	// token is refunded and the failure counter bumps.
+	d, c, _ := reactionsDeps(t)
+	c.history = apronws.HistoryResult{Messages: []apronws.Message{{MessageID: "m1", RoomID: "r1"}}}
+	c.setReactionsErr = OperationalErrorf("connection lost")
+	_, err := d.ReactionsHandler(context.Background(), inv("reactions", []string{"👍"}, map[string]string{"room": "r1", "message": "m1"}, nil), nil)
+	if err == nil || strings.Contains(err.Error(), "usage") {
+		t.Fatalf("error = %v, want an operational error", err)
+	}
+	v, err := d.Store.GetMeta(context.Background(), store.MetaPostFailures)
+	if err != nil {
+		t.Fatalf("get failures: %v", err)
+	}
+	if v != "1" {
+		t.Errorf("consecutive failures = %q, want 1 (operational send failure counts)", v)
+	}
+}
+
+func TestReactionsHandlerSuccessResetsFailures(t *testing.T) {
+	// A confirmed send resets the consecutive failure counter.
+	d, c, st := reactionsDeps(t)
+	c.history = apronws.HistoryResult{Messages: []apronws.Message{{MessageID: "m1", RoomID: "r1"}}}
+	if err := st.SetMeta(context.Background(), store.MetaPostFailures, "3"); err != nil {
+		t.Fatalf("seed failures: %v", err)
+	}
+	if _, err := d.ReactionsHandler(context.Background(), inv("reactions", []string{"👍"}, map[string]string{"room": "r1", "message": "m1"}, nil), nil); err != nil {
+		t.Fatalf("reactions: %v", err)
+	}
+	v, err := st.GetMeta(context.Background(), store.MetaPostFailures)
+	if err != nil {
+		t.Fatalf("get failures: %v", err)
+	}
+	if v != "0" {
+		t.Errorf("consecutive failures after success = %q, want 0", v)
 	}
 }

@@ -173,9 +173,21 @@ func (c *Client) EmojiCatalog(ctx context.Context) (map[string]EmojiEntry, error
 		if err != nil {
 			return nil, err
 		}
+		// A dedicated client, not http.DefaultClient: redirects stay
+		// on the catalog's own host and scheme (a downgrade to http or
+		// a hop to another host refuses), and the fetch cannot hang
+		// past 30s.
 		doer := c.httpDoer
 		if doer == nil {
-			doer = http.DefaultClient
+			doer = &http.Client{
+				Timeout: 30 * time.Second,
+				CheckRedirect: func(req *http.Request, via []*http.Request) error {
+					if req.URL.Scheme != catalogSchemeFor(frame.Emoji.CatalogURL) || req.URL.Host != catalogHost(frame.Emoji.CatalogURL) {
+						return fmt.Errorf("refusing catalog redirect off %s", catalogHost(frame.Emoji.CatalogURL))
+					}
+					return nil
+				},
+			}
 		}
 		resp, err := doer.Do(req)
 		if err != nil {
@@ -192,6 +204,24 @@ func (c *Client) EmojiCatalog(ctx context.Context) (map[string]EmojiEntry, error
 		return catalog, nil
 	}
 	return map[string]EmojiEntry{}, nil
+}
+
+// catalogSchemeFor returns the scheme of a catalog URL.
+func catalogSchemeFor(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Scheme
+}
+
+// catalogHost returns the host of a catalog URL.
+func catalogHost(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Host
 }
 
 // EmojiEntry is one custom emoji's catalog entry.

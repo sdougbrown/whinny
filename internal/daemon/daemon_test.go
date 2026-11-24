@@ -1505,12 +1505,13 @@ func TestRunReactionWake(t *testing.T) {
 
 	// The bot posts; its own post arms the thread subscription and
 	// advances the cursor without waking.
-	h.fc.PushMessage("m1", "r1", "u9", "bot says the thing", nil)
+	h.fc.PushMessageAt("m1", "r1", "u9", "bot says the thing", nil, 100)
 	waitSettled(t, h, 0, "bot's own post must not wake")
 
-	// A human reacts to the bot's message: kind=reaction wakes.
+	// A human reacts to the bot's message: kind=reaction wakes. The
+	// reaction's log id sits above waitSettled's flush line (990001).
 	h.fc.Push("reactions", map[string]any{
-		"log_id":     time.Now().UnixNano(),
+		"log_id":     "990101",
 		"message_id": "m1",
 		"room_id":    "r1",
 		"reactions": []any{
@@ -1528,22 +1529,113 @@ func TestRunReactionWake(t *testing.T) {
 	h.stop(t)
 }
 
-func TestRunReactionSelfIgnored(t *testing.T) {
+func TestRunReactionDedupedByCursor(t *testing.T) {
 	cfg := baseCfg()
 	h := startHarness(t, cfg)
 
-	h.fc.PushMessage("m1", "r1", "u9", "bot says the thing", nil)
+	h.fc.PushMessageAt("m1", "r1", "u9", "bot says the thing", nil, 100)
+	waitSettled(t, h, 0, "bot's own post must not wake")
+
+	payload := map[string]any{
+		"log_id":     "990101",
+		"message_id": "m1",
+		"room_id":    "r1",
+		"reactions": []any{
+			map[string]any{"from": map[string]any{"user_id": "doug"}, "emojis": []string{"👍"}},
+		},
+	}
+	h.fc.Push("reactions", payload)
+	d := h.dlv.wait(t)
+	if d.agent != "squire" {
+		t.Errorf("agent = %q, want squire", d.agent)
+	}
+	// The same record pushed again is deduped by the room cursor.
+	h.fc.Push("reactions", payload)
+	waitSettled(t, h, 1, "replayed reaction must dedupe")
+	h.stop(t)
+}
+
+func TestRunReactionSelfAndPeerIgnored(t *testing.T) {
+	cfg := baseCfg()
+	h := startHarness(t, cfg)
+
+	h.fc.PushMessageAt("m1", "r1", "u9", "bot says the thing", nil, 100)
 	waitSettled(t, h, 0, "bot's own post must not wake")
 
 	// The bot's own reaction set on its own message is never a wake.
 	h.fc.Push("reactions", map[string]any{
-		"log_id":     time.Now().UnixNano(),
-		"message_id": "m1",
-		"room_id":    "r1",
+		"log_id": "990101", "message_id": "m1", "room_id": "r1",
 		"reactions": []any{
 			map[string]any{"from": map[string]any{"user_id": "u9"}, "emojis": []string{"👀"}},
 		},
 	})
-	waitSettled(t, h, 0, "self reaction must not wake")
+	// A peer bot's reaction set is neither (the ack-storm firebreak).
+	h.fc.Push("reactions", map[string]any{
+		"log_id": "990102", "message_id": "m1", "room_id": "r1",
+		"reactions": []any{
+			map[string]any{"from": map[string]any{"user_id": "b1"}, "emojis": []string{"🤖"}},
+		},
+	})
+	waitSettled(t, h, 0, "self and peer-bot reactions must not wake")
+	h.stop(t)
+}
+
+func TestRunReactionMixedAuthorsFiltersSelfAndPeer(t *testing.T) {
+	cfg := baseCfg()
+	h := startHarness(t, cfg)
+
+	h.fc.PushMessageAt("m1", "r1", "u9", "bot says the thing", nil, 100)
+	waitSettled(t, h, 0, "bot's own post must not wake")
+
+	// A record carrying the bot's set, a peer bot's set, and a human's
+	// set wakes once, with the firebroken sets absent from the body.
+	h.fc.Push("reactions", map[string]any{
+		"log_id": "990101", "message_id": "m1", "room_id": "r1",
+		"reactions": []any{
+			map[string]any{"from": map[string]any{"user_id": "u9"}, "emojis": []string{"👀"}},
+			map[string]any{"from": map[string]any{"user_id": "b1"}, "emojis": []string{"🤖"}},
+			map[string]any{"from": map[string]any{"user_id": "doug"}, "emojis": []string{"👍"}},
+		},
+	})
+	d := h.dlv.wait(t)
+	if d.agent != "squire" {
+		t.Errorf("agent = %q, want squire", d.agent)
+	}
+	if strings.Contains(d.env.Text, "👀") || strings.Contains(d.env.Text, "🤖") {
+		t.Errorf("envelope carries a firebroken set: %q", d.env.Text)
+	}
+	if !strings.Contains(d.env.Text, "👍 from doug") {
+		t.Errorf("envelope missing the human's set: %q", d.env.Text)
+	}
+	if strings.Contains(d.env.Text, "from=u9") || strings.Contains(d.env.Text, "from=b1") {
+		t.Errorf("envelope header names a firebroken author: %q", d.env.Text)
+	}
+	h.stop(t)
+}
+
+func TestRunReactionDoesNotSuppressEarlierMessage(t *testing.T) {
+	// The review's cursor-race finding: a reaction must not advance the
+	// cursor past an unprocessed message. The reaction at log 101 lands
+	// before the mention at log 100 was processed; the mention is older
+	// than the cursor the reaction set, and it must still wake.
+	cfg := baseCfg()
+	h := startHarness(t, cfg)
+
+	h.fc.Push("reactions", map[string]any{
+		"log_id": "101", "message_id": "m1", "room_id": "r1",
+		"reactions": []any{
+			map[string]any{"from": map[string]any{"user_id": "doug"}, "emojis": []string{"👍"}},
+		},
+	})
+	// The mention at log 100 arrives after the reaction at 101 was
+	// pumped; it is older than the reaction but must still wake.
+	h.fc.PushMessageAt("m0", "r1", "doug", "squire ping", []string{"u9"}, 100)
+	d := h.dlv.wait(t)
+	if d.agent != "squire" {
+		t.Errorf("agent = %q, want squire", d.agent)
+	}
+	if !strings.Contains(d.env.Text, "kind=mention") || !strings.Contains(d.env.Text, "squire ping") {
+		t.Errorf("envelope = %q, want the mention wake", d.env.Text)
+	}
 	h.stop(t)
 }
